@@ -1,69 +1,72 @@
-"""Thin wrapper around OpenAI SDK for chat completions with tool use."""
+"""Thin OpenAI wrapper for SGR-style structured completions."""
 
-from typing import Any
+import logging
+import re
+import time
+from typing import Any, TypeVar
 
 import openai
+from pydantic import BaseModel
 
 from pac_cortex.config import settings
+
+logger = logging.getLogger(__name__)
+
+T = TypeVar("T", bound=BaseModel)
+
+_RETRY_DELAY_RE = re.compile(r"retry in (\d+(?:\.\d+)?)s", re.IGNORECASE)
+_MAX_RETRIES = 6
+
+
+def _retry_delay_from_error(exc: openai.RateLimitError) -> float:
+    """Extract suggested retry delay from Gemini/OpenAI rate-limit response."""
+    m = _RETRY_DELAY_RE.search(str(exc))
+    return float(m.group(1)) if m else 60.0
 
 
 class LLMClient:
     def __init__(self) -> None:
-        self._client = openai.AsyncOpenAI(api_key=settings.llm_api_key)
+        # max_retries=0: we do our own backoff so the SDK doesn't burn retries instantly
+        self._client = openai.OpenAI(
+            api_key=settings.llm_api_key or None,
+            max_retries=0,
+        )
         self.total_prompt_tokens: int = 0
         self.total_completion_tokens: int = 0
 
-    async def chat(
+    def parse_step(
         self,
         messages: list[dict[str, Any]],
-        tools: list[dict[str, Any]] | None = None,
-        max_retries: int = 2,
-    ) -> dict[str, Any]:
-        """Send a chat completion request. Returns parsed response with tool_calls or content."""
-        kwargs: dict[str, Any] = {
-            "model": settings.llm_model,
-            "messages": messages,
-        }
-        if tools:
-            kwargs["tools"] = tools
-
-        last_error: Exception | None = None
-        for _ in range(max_retries + 1):
+        response_format: type[T],
+        max_completion_tokens: int = 16384,
+    ) -> T:
+        for attempt in range(_MAX_RETRIES + 1):
             try:
-                response = await self._client.chat.completions.create(**kwargs)
-                break
-            except openai.RateLimitError as e:
-                last_error = e
-                continue
-            except openai.APIError as e:
-                last_error = e
-                continue
-        else:
-            msg = f"LLM request failed after {max_retries + 1} attempts"
-            raise RuntimeError(msg) from last_error
+                resp = self._client.beta.chat.completions.parse(
+                    model=settings.llm_model,
+                    messages=messages,  # type: ignore[arg-type]
+                    response_format=response_format,
+                    max_completion_tokens=max_completion_tokens,
+                )
+                usage = resp.usage
+                if usage:
+                    self.total_prompt_tokens += usage.prompt_tokens
+                    self.total_completion_tokens += usage.completion_tokens
+                parsed = resp.choices[0].message.parsed
+                if parsed is None:
+                    raise RuntimeError("LLM returned no parsed response")
+                return parsed
+            except openai.RateLimitError as exc:
+                if attempt == _MAX_RETRIES:
+                    raise
+                delay = _retry_delay_from_error(exc)
+                logger.warning("Rate limit — waiting %.0fs (attempt %d)", delay, attempt + 1)
+                time.sleep(delay)
+            except openai.APIError as exc:
+                if attempt == _MAX_RETRIES:
+                    raise
+                delay = 2.0 ** attempt
+                logger.warning("API error %s — retrying in %.0fs", exc, delay)
+                time.sleep(delay)
 
-        choice = response.choices[0]
-        usage = response.usage
-        if usage:
-            self.total_prompt_tokens += usage.prompt_tokens
-            self.total_completion_tokens += usage.completion_tokens
-
-        if choice.message.tool_calls:
-            return {
-                "type": "tool_calls",
-                "tool_calls": [
-                    {
-                        "id": tc.id,
-                        "name": tc.function.name,
-                        "arguments": tc.function.arguments,
-                    }
-                    for tc in choice.message.tool_calls
-                ],
-                "raw_message": choice.message,
-            }
-
-        return {
-            "type": "text",
-            "content": choice.message.content or "",
-            "raw_message": choice.message,
-        }
+        raise RuntimeError("parse_step exhausted retries")  # unreachable

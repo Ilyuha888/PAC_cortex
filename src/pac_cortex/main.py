@@ -1,10 +1,7 @@
 """CLI entrypoint for PAC_cortex."""
 
-import asyncio
 import logging
 import sys
-
-import httpx
 
 from pac_cortex.config import settings
 
@@ -17,30 +14,32 @@ def _setup_logging() -> None:
     )
 
 
-async def cmd_smoke() -> None:
+def cmd_smoke() -> None:
     """Test connectivity to BitGN API and LLM."""
-    print(f"BitGN API: {settings.bitgn_api_url}")
-    print(f"LLM model: {settings.llm_model}")
+    from connectrpc.errors import ConnectError
 
-    # Test BitGN connectivity
+    from pac_cortex.client import HarnessClient
+
+    print(f"BitGN host:  {settings.benchmark_host}")
+    print(f"Benchmark:   {settings.benchmark_id}")
+    print(f"LLM model:   {settings.llm_model}")
+
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get(settings.bitgn_api_url)
-            print(f"BitGN status: {resp.status_code}")
-    except httpx.ConnectError:
-        print("BitGN status: connection failed (expected if sandbox not yet live)")
+        harness = HarnessClient(settings.benchmark_host)
+        status = harness.status()
+        print(f"BitGN status: {status}")
+    except ConnectError as e:
+        print(f"BitGN status: {e.code}: {e.message}")
     except Exception as e:
         print(f"BitGN status: {type(e).__name__}: {e}")
 
-    # Test LLM connectivity
     if settings.llm_api_key:
         try:
             import openai
-
-            client = openai.AsyncOpenAI(api_key=settings.llm_api_key)
-            resp = await client.chat.completions.create(
+            client = openai.OpenAI(api_key=settings.llm_api_key)
+            resp = client.chat.completions.create(
                 model=settings.llm_model,
-                messages=[{"role": "user", "content": "ping"}],
+                messages=[{"role": "user", "content": "ping"}],  # type: ignore[list-item]
                 max_tokens=5,
             )
             print(f"LLM status: ok ({resp.choices[0].message.content})")
@@ -50,28 +49,33 @@ async def cmd_smoke() -> None:
         print("LLM status: no API key configured")
 
 
-async def cmd_run() -> None:
+def cmd_run(task_filter: list[str] | None = None) -> None:
     """Execute a full session."""
     from pac_cortex.runner import run_session
 
-    results = await run_session()
-    completed = sum(1 for r in results if r["status"] == "completed")
-    print(f"\nResults: {completed}/{len(results)} tasks completed")
+    results = run_session(task_filter)
+    if not results:
+        print("No tasks completed.")
+        return
+    perfect = sum(1 for r in results if r["score"] == 1.0)
+    avg = sum(r["score"] for r in results) / len(results) * 100
+    print(f"\nResults: {perfect}/{len(results)} perfect, {avg:.1f}% avg score")
 
 
 def main() -> None:
     _setup_logging()
 
     if len(sys.argv) < 2:
-        print("Usage: python -m pac_cortex <command>")
+        print("Usage: python -m pac_cortex <command> [task_id ...]")
         print("Commands: run, smoke")
         sys.exit(1)
 
     command = sys.argv[1]
     if command == "smoke":
-        asyncio.run(cmd_smoke())
+        cmd_smoke()
     elif command == "run":
-        asyncio.run(cmd_run())
+        task_filter = sys.argv[2:] or None
+        cmd_run(task_filter)
     else:
         print(f"Unknown command: {command}")
         sys.exit(1)

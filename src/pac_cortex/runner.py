@@ -1,46 +1,57 @@
 """Session orchestrator: fetch tasks, run agent, collect results."""
 
 import logging
-from typing import Any
 
 from pac_cortex.agent import solve_task
-from pac_cortex.client import BitgnClient
+from pac_cortex.client import HarnessClient, VmClient
+from pac_cortex.config import settings
 from pac_cortex.llm import LLMClient
 
 logger = logging.getLogger(__name__)
 
 
-async def run_session() -> list[dict[str, Any]]:
+def run_session(task_filter: list[str] | None = None) -> list[dict]:
     """Execute a full session: fetch all tasks and solve them sequentially."""
-    client = BitgnClient()
+    harness = HarnessClient(settings.benchmark_host)
     llm = LLMClient()
-    results: list[dict[str, Any]] = []
+    results: list[dict] = []
 
-    try:
-        tasks = await client.get_tasks()
-        logger.info("Fetched %d tasks", len(tasks))
+    tasks = harness.list_tasks(settings.benchmark_id)
+    logger.info("Fetched %d tasks", len(tasks))
 
-        for i, task in enumerate(tasks, 1):
-            task_id = task.get("id", "unknown")
-            logger.info("Task %d/%d: %s", i, len(tasks), task_id)
-            try:
-                result = await solve_task(task, client, llm)
-                results.append(result)
-                logger.info("Task %s finished: %s", task_id, result["status"])
-            except Exception:
-                logger.exception("Task %s failed", task_id)
-                results.append({"run_id": None, "status": "error", "task_id": task_id})
-    finally:
-        await client.close()
+    for i, task in enumerate(tasks, 1):
+        if task_filter and task.task_id not in task_filter:
+            continue
 
-    # Summary
-    completed = sum(1 for r in results if r["status"] == "completed")
-    logger.info(
-        "Session done: %d/%d completed, %d tokens used (prompt=%d, completion=%d)",
-        completed,
-        len(results),
-        llm.total_prompt_tokens + llm.total_completion_tokens,
-        llm.total_prompt_tokens,
-        llm.total_completion_tokens,
-    )
+        logger.info("Task %d/%d: %s", i, len(tasks), task.task_id)
+        trial = harness.start_trial(settings.benchmark_id, task.task_id)
+        logger.info("Trial %s | %s", trial.trial_id, trial.instruction[:80])
+
+        try:
+            vm = VmClient(trial.harness_url)
+            solve_task(trial.instruction, vm, llm)
+        except Exception:
+            logger.exception("Task %s failed", task.task_id)
+
+        trial_result = harness.end_trial(trial.trial_id)
+        results.append({
+            "task_id": task.task_id,
+            "trial_id": trial.trial_id,
+            "score": trial_result.score,
+            "score_detail": trial_result.score_detail,
+        })
+        status = "OK" if trial_result.score == 1.0 else "FAIL"
+        logger.info("Task %s: %s score=%.2f", task.task_id, status, trial_result.score)
+        if trial_result.score_detail:
+            logger.info("Task %s detail: %s", task.task_id, trial_result.score_detail)
+
+    if results:
+        avg = sum(r["score"] for r in results) / len(results) * 100
+        logger.info(
+            "Session done: %.1f%% avg | tokens prompt=%d completion=%d",
+            avg,
+            llm.total_prompt_tokens,
+            llm.total_completion_tokens,
+        )
+
     return results
