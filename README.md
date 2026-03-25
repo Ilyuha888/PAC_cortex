@@ -6,7 +6,7 @@ Solves tasks in a deterministic simulated environment via API. Scored on correct
 
 ## Status
 
-Skeleton — waiting for BitGN sandbox/SDK to go live for integration.
+Fully operational. SDK integration complete; agent runs the full SGR loop against the BitGN benchmark harness.
 
 ## Setup
 
@@ -17,7 +17,7 @@ uv sync
 # Copy and fill in env vars
 cp .env.example .env
 
-# Test connectivity (will fail until sandbox is live)
+# Test connectivity
 uv run python -m pac_cortex smoke
 
 # Run full session
@@ -29,10 +29,11 @@ uv run python -m pac_cortex run
 ```
 src/pac_cortex/
   config.py    — settings via env vars (Pydantic)
-  client.py    — BitGN API client stub
+  client.py    — BitGN API clients (HarnessClient, VmClient) with retry/timeout
   llm.py       — OpenAI SDK wrapper (chat + tool use)
   agent.py     — core control loop (task solver)
   safety.py    — injection detection, tool validation, secret redaction
+  tracer.py    — per-task trace file writer for agent observability
   runner.py    — session orchestrator
   main.py      — CLI entrypoint
 ```
