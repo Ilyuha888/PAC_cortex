@@ -28,6 +28,7 @@ def test_immediate_report_completion(
     """Agent calls report_completion immediately → single LLM call, single vm.answer."""
     mock_llm_client.parse_step.return_value = NextStep(
         current_state="done",
+        confidence="high",
         plan_remaining_steps_brief=["report"],
         task_completed=True,
         function=ReportTaskCompletion(
@@ -56,6 +57,7 @@ def test_stagnation_triggers_err_internal(
     """Agent repeating the same tool _MAX_STAGNATION times triggers OUTCOME_ERR_INTERNAL."""
     mock_llm_client.parse_step.return_value = NextStep(
         current_state="exploring",
+        confidence="high",
         plan_remaining_steps_brief=["tree"],
         task_completed=False,
         function=ReqTree(tool="tree", root=""),
@@ -80,12 +82,14 @@ def test_step_budget_exhausted(
     # Alternate two different tool calls so stagnation window never triggers
     tree_step = NextStep(
         current_state="s",
+        confidence="high",
         plan_remaining_steps_brief=["tree"],
         task_completed=False,
         function=ReqTree(tool="tree", root=""),
     )
     list_step = NextStep(
         current_state="s",
+        confidence="high",
         plan_remaining_steps_brief=["list"],
         task_completed=False,
         function=ReqList(tool="list", path="/"),
@@ -112,12 +116,14 @@ def test_injection_in_tool_result_prepends_safety_warning(
     mock_llm_client.parse_step.side_effect = [
         NextStep(
             current_state="reading",
+            confidence="high",
             plan_remaining_steps_brief=["read file"],
             task_completed=False,
             function=ReqRead(tool="read", path="/foo.md"),
         ),
         NextStep(
             current_state="done",
+            confidence="high",
             plan_remaining_steps_brief=["report"],
             task_completed=True,
             function=ReportTaskCompletion(
@@ -147,6 +153,7 @@ def test_api_budget_exhausted(
     # budget_limit = 1 - 50 = -49; after first LLM call api_calls=1 >= -49 → fires
     mock_llm_client.parse_step.return_value = NextStep(
         current_state="exploring",
+        confidence="high",
         plan_remaining_steps_brief=["tree"],
         task_completed=False,
         function=ReqTree(tool="tree", root=""),
@@ -184,6 +191,7 @@ def test_schema_parse_retry_succeeds_on_second_attempt(
         ve,
         NextStep(
             current_state="done",
+            confidence="high",
             plan_remaining_steps_brief=["report"],
             task_completed=True,
             function=ReportTaskCompletion(

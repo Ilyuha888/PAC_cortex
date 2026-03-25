@@ -153,6 +153,9 @@ class ReqMove(BaseModel):
 
 class NextStep(BaseModel):
     current_state: str
+    confidence: Literal["high", "medium", "low"] = Field(
+        ..., description="how confident you are that this step is correct and useful"
+    )
     plan_remaining_steps_brief: Annotated[list[str], MinLen(1), MaxLen(5)] = Field(
         ...,
         description="briefly explain the next useful steps",
@@ -223,6 +226,7 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
             try:
                 job = llm.parse_step(log, NextStep)
                 api_calls += 1
+                logger.debug("step=%d confidence=%s", step_num + 1, job.confidence)
                 break
             except ValidationError as exc:
                 api_calls += 1
