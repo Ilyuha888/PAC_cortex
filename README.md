@@ -46,6 +46,8 @@ uv run pytest
 
 ## Architecture
 
+See [ARCHITECTURE.md](ARCHITECTURE.md) for system design, module map, control flow, and invariants.
+
 - Stateless per-task, single process, no database
 - ~1000 API calls/task budget with hard guard
 - Sequential task execution
