@@ -35,9 +35,9 @@ def cmd_smoke() -> None:
 
     if settings.llm_api_key:
         try:
-            import openai
-            client = openai.OpenAI(api_key=settings.llm_api_key)
-            resp = client.chat.completions.create(
+            from pac_cortex.llm import LLMClient
+            llm = LLMClient()
+            resp = llm._client.chat.completions.create(
                 model=settings.llm_model,
                 messages=[{"role": "user", "content": "ping"}],  # type: ignore[list-item]
                 max_tokens=5,

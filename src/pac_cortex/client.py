@@ -1,5 +1,9 @@
 """BitGN API clients: harness lifecycle and per-task VM runtime."""
 
+import logging
+import time
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from bitgn.harness_connect import HarnessServiceClientSync  # noqa: I001
@@ -23,8 +27,13 @@ from bitgn.vm.pcm_pb2 import (
     TreeRequest,
     WriteRequest,
 )
+from connectrpc.errors import ConnectError
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel
+
+from pac_cortex.config import settings as _settings
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Typed boundary models
@@ -105,52 +114,66 @@ class VmClient:
     def __init__(self, harness_url: str) -> None:
         self._vm = PcmRuntimeClientSync(harness_url)
 
-    def _to_dict(self, result: Any) -> dict[str, Any]:
-        return MessageToDict(result) if result else {}
+    def _call(self, fn: Callable[[], Any]) -> dict[str, Any]:
+        retries = _settings.vm_call_retries
+        for attempt in range(retries + 1):
+            with ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(fn)
+                try:
+                    result = future.result(timeout=_settings.vm_call_timeout_s)
+                    return MessageToDict(result) if result else {}
+                except TimeoutError:
+                    logger.warning("VmClient call timed out (attempt %d)", attempt)
+                    if attempt == retries:
+                        raise RuntimeError("VmClient call timed out after retries") from None
+                except ConnectError as exc:
+                    logger.warning(
+                        "VmClient ConnectError %s %s (attempt %d)", exc.code, exc.message, attempt
+                    )
+                    if attempt == retries:
+                        raise
+            time.sleep(2.0 ** attempt)
+        raise RuntimeError("VmClient._call exhausted retries")  # unreachable
 
     def tree(self, root: str = "") -> dict[str, Any]:
-        return self._to_dict(self._vm.tree(TreeRequest(root=root)))
+        return self._call(lambda: self._vm.tree(TreeRequest(root=root)))
 
     def find(
         self, name: str, root: str = "/", kind: str = "all", limit: int = 10
     ) -> dict[str, Any]:
         type_map = {"all": 0, "files": 1, "dirs": 2}
-        return self._to_dict(
-            self._vm.find(FindRequest(root=root, name=name, type=type_map[kind], limit=limit))
-        )
+        req = FindRequest(root=root, name=name, type=type_map[kind], limit=limit)
+        return self._call(lambda: self._vm.find(req))
 
     def search(self, pattern: str, limit: int = 10, root: str = "/") -> dict[str, Any]:
-        return self._to_dict(
-            self._vm.search(SearchRequest(root=root, pattern=pattern, limit=limit))
-        )
+        req = SearchRequest(root=root, pattern=pattern, limit=limit)
+        return self._call(lambda: self._vm.search(req))
 
     def list(self, path: str = "/") -> dict[str, Any]:
-        return self._to_dict(self._vm.list(ListRequest(name=path)))
+        return self._call(lambda: self._vm.list(ListRequest(name=path)))
 
     def read(self, path: str) -> dict[str, Any]:
-        return self._to_dict(self._vm.read(ReadRequest(path=path)))
+        return self._call(lambda: self._vm.read(ReadRequest(path=path)))
 
     def write(self, path: str, content: str) -> dict[str, Any]:
-        return self._to_dict(self._vm.write(WriteRequest(path=path, content=content)))
+        return self._call(lambda: self._vm.write(WriteRequest(path=path, content=content)))
 
     def delete(self, path: str) -> dict[str, Any]:
-        return self._to_dict(self._vm.delete(DeleteRequest(path=path)))
+        return self._call(lambda: self._vm.delete(DeleteRequest(path=path)))
 
     def mkdir(self, path: str) -> dict[str, Any]:
-        return self._to_dict(self._vm.mk_dir(MkDirRequest(path=path)))
+        return self._call(lambda: self._vm.mk_dir(MkDirRequest(path=path)))
 
     def move(self, from_name: str, to_name: str) -> dict[str, Any]:
-        return self._to_dict(self._vm.move(MoveRequest(from_name=from_name, to_name=to_name)))
+        req = MoveRequest(from_name=from_name, to_name=to_name)
+        return self._call(lambda: self._vm.move(req))
 
     def answer(
         self, message: str, outcome: str, refs: list[str] | None = None
     ) -> dict[str, Any]:
-        return self._to_dict(
-            self._vm.answer(
-                AnswerRequest(
-                    message=message,
-                    outcome=_OUTCOME_BY_NAME[outcome],
-                    refs=refs or [],
-                )
-            )
+        req = AnswerRequest(
+            message=message,
+            outcome=_OUTCOME_BY_NAME[outcome],
+            refs=refs or [],
         )
+        return self._call(lambda: self._vm.answer(req))

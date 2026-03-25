@@ -263,6 +263,9 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
         except ConnectError as exc:
             result_str = f"[TOOL ERROR {exc.code}]: {exc.message}"
             logger.warning("ConnectError on %s: %s %s", tool_name, exc.code, exc.message)
+        except RuntimeError as exc:
+            result_str = f"[TOOL ERROR]: {exc}"
+            logger.warning("RuntimeError on %s: %s", tool_name, exc)
 
         # Safety pipeline on tool results
         warnings = scan_for_injection(result_str)

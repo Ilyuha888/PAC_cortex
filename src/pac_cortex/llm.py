@@ -29,6 +29,7 @@ class LLMClient:
         # max_retries=0: we do our own backoff so the SDK doesn't burn retries instantly
         self._client = openai.OpenAI(
             api_key=settings.llm_api_key or None,
+            base_url=settings.openai_base_url or None,
             max_retries=0,
         )
         self.total_prompt_tokens: int = 0
