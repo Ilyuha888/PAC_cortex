@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, ValidationError
 from pac_cortex.client import VmClient
 from pac_cortex.config import settings
 from pac_cortex.llm import LLMClient
-from pac_cortex.safety import redact_secrets, scan_for_injection
+from pac_cortex.safety import redact_secrets, scan_for_injection, validate_tool_call
 from pac_cortex.tracer import TaskTracer
 
 logger = logging.getLogger(__name__)
@@ -19,6 +19,10 @@ logger = logging.getLogger(__name__)
 _MAX_STEPS = 30
 _MAX_STAGNATION = 3
 _API_BUDGET_MARGIN: int = 50
+_ALLOWED_TOOLS: frozenset[str] = frozenset({
+    "tree", "find", "search", "list", "read", "write",
+    "delete", "mkdir", "move", "report_completion",
+})
 
 # SYSTEM_PROMPT — Design Rationale
 #
@@ -332,6 +336,18 @@ def solve_task(
             }],
         })
 
+        tool_args = job.function.model_dump(exclude={"tool"})
+        if not validate_tool_call(tool_name, tool_args, allowed_tools=_ALLOWED_TOOLS):
+            logger.warning("Tool call blocked by safety gate: %s %s", tool_name, tool_args)
+            vm.answer(
+                message=f"Security violation: blocked tool call {tool_name}",
+                outcome="OUTCOME_DENIED_SECURITY",
+                refs=[],
+            )
+            if tracer:
+                tracer.record_error("tool call blocked by safety gate", api_calls)
+            return
+
         try:
             result = _dispatch(vm, job.function)
             api_calls += 1
@@ -345,10 +361,17 @@ def solve_task(
 
         # Safety pipeline on tool results
         prev_warnings = scan_for_injection(result_str)
-        if prev_warnings:
-            logger.warning("Injection patterns in tool result: %s", prev_warnings)
-            result_str = f"[SAFETY WARNING: suspicious patterns: {prev_warnings}]\n{result_str}"
         result_str = redact_secrets(result_str)
+        if prev_warnings:
+            logger.warning("Injection patterns in tool result — aborting task: %s", prev_warnings)
+            if tracer:
+                tracer.record_tool_result(f"[INJECTION ABORT: {prev_warnings}]")
+            vm.answer(
+                message=f"Security violation: injection patterns detected: {prev_warnings}",
+                outcome="OUTCOME_DENIED_SECURITY",
+                refs=[],
+            )
+            return
 
         if tracer:
             tracer.record_tool_result(result_str)

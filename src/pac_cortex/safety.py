@@ -120,7 +120,9 @@ def scan_for_injection(content: str) -> list[str]:
     return warnings
 
 
-def validate_tool_call(name: str, args: dict, allowed_tools: set[str] | None = None) -> bool:
+def validate_tool_call(
+    name: str, args: dict, allowed_tools: frozenset[str] | set[str] | None = None
+) -> bool:
     """Check tool call against allowed actions. Returns True if valid."""
     if allowed_tools is not None and name not in allowed_tools:
         return False
