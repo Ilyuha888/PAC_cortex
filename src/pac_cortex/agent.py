@@ -9,6 +9,7 @@ from connectrpc.errors import ConnectError
 from pydantic import BaseModel, Field, ValidationError
 
 from pac_cortex.client import VmClient
+from pac_cortex.config import settings
 from pac_cortex.llm import LLMClient
 from pac_cortex.safety import redact_secrets, scan_for_injection
 
@@ -16,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 _MAX_STEPS = 30
 _MAX_STAGNATION = 3
+_API_BUDGET_MARGIN: int = 50
 
 SYSTEM_PROMPT = """\
 You are a pragmatic personal knowledge management assistant.
@@ -209,6 +211,8 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
         {"role": "user", "content": instruction},
     ]
     recent_tools: list[str] = []
+    api_calls: int = 0
+    budget_limit: int = settings.api_call_budget - _API_BUDGET_MARGIN
 
     for step_num in range(_MAX_STEPS):
         step_id = f"step_{step_num + 1}"
@@ -218,10 +222,13 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
         for parse_attempt in range(_MAX_PARSE_RETRIES + 1):
             try:
                 job = llm.parse_step(log, NextStep)
+                api_calls += 1
                 break
             except ValidationError as exc:
+                api_calls += 1
                 if parse_attempt == _MAX_PARSE_RETRIES:
                     logger.error("Schema validation failed after %d retries", _MAX_PARSE_RETRIES)
+                    api_calls += 1
                     vm.answer(
                         message="Agent failed schema validation",
                         outcome="OUTCOME_ERR_INTERNAL",
@@ -230,6 +237,14 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
                 logger.warning("Schema validation error (attempt %d): %s", parse_attempt + 1, exc)
                 log.append({"role": "user", "content": _SCHEMA_CORRECTION})
         assert job is not None
+
+        if api_calls >= budget_limit:
+            logger.warning(
+                "API budget limit reached: %d/%d calls used", api_calls, settings.api_call_budget
+            )
+            api_calls += 1
+            vm.answer(message="API call budget exhausted", outcome="OUTCOME_ERR_INTERNAL")
+            return
 
         tool_name = job.function.tool
         logger.info("%s: %s → %s", step_id, job.plan_remaining_steps_brief[0], tool_name)
@@ -241,6 +256,7 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
             recent_tools.pop(0)
         if len(recent_tools) == _MAX_STAGNATION and len(set(recent_tools)) == 1:
             logger.warning("Stagnation: %s repeated %d times", tool_name, _MAX_STAGNATION)
+            api_calls += 1
             vm.answer(message="Agent stuck in repeated tool loop", outcome="OUTCOME_ERR_INTERNAL")
             return
 
@@ -259,6 +275,7 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
 
         try:
             result = _dispatch(vm, job.function)
+            api_calls += 1
             result_str = json.dumps(result, indent=2) if result else "{}"
         except ConnectError as exc:
             result_str = f"[TOOL ERROR {exc.code}]: {exc.message}"
@@ -278,10 +295,13 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
 
         if isinstance(job.function, ReportTaskCompletion):
             logger.info(
-                "Task complete: %s (%s)", job.function.message, job.function.outcome
+                "Task complete: %s (%s) | api_calls=%d/%d",
+                job.function.message, job.function.outcome,
+                api_calls, settings.api_call_budget,
             )
             return
 
     # Step budget exhausted
     logger.warning("Step budget exhausted (%d steps)", _MAX_STEPS)
+    api_calls += 1
     vm.answer(message="Step budget exhausted", outcome="OUTCOME_ERR_INTERNAL")

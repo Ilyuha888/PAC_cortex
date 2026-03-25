@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     openai_base_url: str = ""
     vm_call_timeout_s: float = 10.0
     vm_call_retries: int = 2
+    api_call_budget: int = 1000
 
 
 settings = Settings()

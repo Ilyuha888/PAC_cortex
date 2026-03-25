@@ -139,6 +139,26 @@ def test_injection_in_tool_result_prepends_safety_warning(
     assert "[SAFETY WARNING:" in tool_msg["content"]
 
 
+def test_api_budget_exhausted(
+    mock_vm_client: MagicMock, mock_llm_client: MagicMock, monkeypatch
+) -> None:
+    """Budget limit fires immediately when api_call_budget is tiny."""
+    monkeypatch.setattr("pac_cortex.agent.settings.api_call_budget", 1)
+    # budget_limit = 1 - 50 = -49; after first LLM call api_calls=1 >= -49 → fires
+    mock_llm_client.parse_step.return_value = NextStep(
+        current_state="exploring",
+        plan_remaining_steps_brief=["tree"],
+        task_completed=False,
+        function=ReqTree(tool="tree", root=""),
+    )
+
+    solve_task("do something", mock_vm_client, mock_llm_client)
+
+    mock_vm_client.answer.assert_called_once_with(
+        message="API call budget exhausted", outcome="OUTCOME_ERR_INTERNAL"
+    )
+
+
 def test_schema_parse_retry_exhausted(
     mock_vm_client: MagicMock, mock_llm_client: MagicMock
 ) -> None:
