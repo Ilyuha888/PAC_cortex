@@ -2,6 +2,9 @@
 
 import logging
 
+import openai
+from connectrpc.errors import ConnectError
+
 from pac_cortex.agent import solve_task
 from pac_cortex.client import HarnessClient, VmClient
 from pac_cortex.config import settings
@@ -30,8 +33,8 @@ def run_session(task_filter: list[str] | None = None) -> list[dict]:
         try:
             vm = VmClient(trial.harness_url)
             solve_task(trial.instruction, vm, llm)
-        except Exception:
-            logger.exception("Task %s failed", task.task_id)
+        except (openai.APIError, ConnectError) as exc:
+            logger.exception("Task %s failed (recoverable): %s", task.task_id, type(exc).__name__)
 
         trial_result = harness.end_trial(trial.trial_id)
         results.append({

@@ -60,6 +60,9 @@ def cmd_run(task_filter: list[str] | None = None) -> None:
     perfect = sum(1 for r in results if r["score"] == 1.0)
     avg = sum(r["score"] for r in results) / len(results) * 100
     print(f"\nResults: {perfect}/{len(results)} perfect, {avg:.1f}% avg score")
+    zeroed = [r["task_id"] for r in results if r["score"] == 0.0]
+    if zeroed:
+        print(f"{len(zeroed)}/{len(results)} tasks scored 0 — check logs for details")
 
 
 def main() -> None:
