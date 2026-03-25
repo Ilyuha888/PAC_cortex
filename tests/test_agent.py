@@ -12,6 +12,7 @@ from pac_cortex.agent import (
     ReqTree,
     solve_task,
 )
+from pac_cortex.tracer import TaskTracer
 
 
 def _make_validation_error() -> ValidationError:
@@ -180,6 +181,44 @@ def test_schema_parse_retry_exhausted(
         message="Agent failed schema validation",
         outcome="OUTCOME_ERR_INTERNAL",
     )
+
+
+def test_tracer_writes_file(
+    mock_vm_client: MagicMock, mock_llm_client: MagicMock, tmp_path
+) -> None:
+    """TaskTracer creates a readable trace file with step and completion records."""
+    mock_llm_client.parse_step.return_value = NextStep(
+        current_state="done",
+        confidence="high",
+        plan_remaining_steps_brief=["report"],
+        task_completed=True,
+        function=ReportTaskCompletion(
+            tool="report_completion",
+            completed_steps_laconic=["done"],
+            message="All done",
+            grounding_refs=[],
+            outcome="OUTCOME_OK",
+        ),
+    )
+
+    tracer = TaskTracer(
+        task_id="task-test",
+        trial_id="abcd1234efgh",
+        instruction="Do the thing",
+        trace_dir=str(tmp_path),
+    )
+    solve_task("Do the thing", mock_vm_client, mock_llm_client, tracer=tracer)
+    tracer.close()
+
+    trace_files = list(tmp_path.glob("*.txt"))
+    assert len(trace_files) == 1
+    content = trace_files[0].read_text()
+    assert "task-test" in content
+    assert "abcd1234" in content
+    assert "Do the thing" in content
+    assert "--- Step 1 ---" in content
+    assert "OUTCOME_OK" in content
+    assert "=== COMPLETED ===" in content
 
 
 def test_schema_parse_retry_succeeds_on_second_attempt(

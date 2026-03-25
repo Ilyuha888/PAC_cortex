@@ -12,6 +12,7 @@ class Settings(BaseSettings):
     vm_call_timeout_s: float = 10.0
     vm_call_retries: int = 2
     api_call_budget: int = 1000
+    trace_dir: str = "traces"
 
 
 settings = Settings()

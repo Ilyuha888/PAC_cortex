@@ -12,6 +12,7 @@ from pac_cortex.client import VmClient
 from pac_cortex.config import settings
 from pac_cortex.llm import LLMClient
 from pac_cortex.safety import redact_secrets, scan_for_injection
+from pac_cortex.tracer import TaskTracer
 
 logger = logging.getLogger(__name__)
 
@@ -207,7 +208,12 @@ def _dispatch(vm: VmClient, cmd: BaseModel) -> dict:
 # Agent loop
 # ---------------------------------------------------------------------------
 
-def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
+def solve_task(
+    instruction: str,
+    vm: VmClient,
+    llm: LLMClient,
+    tracer: TaskTracer | None = None,
+) -> None:
     """Run the SGR agent loop for a single task."""
     log: list[dict] = [
         {"role": "system", "content": SYSTEM_PROMPT},
@@ -216,6 +222,7 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
     recent_tools: list[str] = []
     api_calls: int = 0
     budget_limit: int = settings.api_call_budget - _API_BUDGET_MARGIN
+    prev_warnings: list[str] = []
 
     for step_num in range(_MAX_STEPS):
         step_id = f"step_{step_num + 1}"
@@ -237,10 +244,15 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
                         message="Agent failed schema validation",
                         outcome="OUTCOME_ERR_INTERNAL",
                     )
+                    if tracer:
+                        tracer.record_error("schema validation failed", api_calls)
                     return
                 logger.warning("Schema validation error (attempt %d): %s", parse_attempt + 1, exc)
                 log.append({"role": "user", "content": _SCHEMA_CORRECTION})
         assert job is not None
+
+        if tracer:
+            tracer.record_step(step_num + 1, len(log), job, prev_warnings)
 
         if api_calls >= budget_limit:
             logger.warning(
@@ -248,6 +260,8 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
             )
             api_calls += 1
             vm.answer(message="API call budget exhausted", outcome="OUTCOME_ERR_INTERNAL")
+            if tracer:
+                tracer.record_error("API budget exhausted", api_calls)
             return
 
         tool_name = job.function.tool
@@ -262,6 +276,8 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
             logger.warning("Stagnation: %s repeated %d times", tool_name, _MAX_STAGNATION)
             api_calls += 1
             vm.answer(message="Agent stuck in repeated tool loop", outcome="OUTCOME_ERR_INTERNAL")
+            if tracer:
+                tracer.record_error("stagnation", api_calls)
             return
 
         log.append({
@@ -289,11 +305,14 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
             logger.warning("RuntimeError on %s: %s", tool_name, exc)
 
         # Safety pipeline on tool results
-        warnings = scan_for_injection(result_str)
-        if warnings:
-            logger.warning("Injection patterns in tool result: %s", warnings)
-            result_str = f"[SAFETY WARNING: suspicious patterns: {warnings}]\n{result_str}"
+        prev_warnings = scan_for_injection(result_str)
+        if prev_warnings:
+            logger.warning("Injection patterns in tool result: %s", prev_warnings)
+            result_str = f"[SAFETY WARNING: suspicious patterns: {prev_warnings}]\n{result_str}"
         result_str = redact_secrets(result_str)
+
+        if tracer:
+            tracer.record_tool_result(result_str)
 
         log.append({"role": "tool", "content": result_str, "tool_call_id": step_id})
 
@@ -303,9 +322,13 @@ def solve_task(instruction: str, vm: VmClient, llm: LLMClient) -> None:
                 job.function.message, job.function.outcome,
                 api_calls, settings.api_call_budget,
             )
+            if tracer:
+                tracer.record_completion(job.function.outcome, job.function.message, api_calls)
             return
 
     # Step budget exhausted
     logger.warning("Step budget exhausted (%d steps)", _MAX_STEPS)
     api_calls += 1
     vm.answer(message="Step budget exhausted", outcome="OUTCOME_ERR_INTERNAL")
+    if tracer:
+        tracer.record_error("step budget exhausted", api_calls)

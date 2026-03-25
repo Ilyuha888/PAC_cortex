@@ -1,6 +1,7 @@
 """Session orchestrator: fetch tasks, run agent, collect results."""
 
 import logging
+from pathlib import Path
 
 import openai
 from connectrpc.errors import ConnectError
@@ -9,6 +10,7 @@ from pac_cortex.agent import solve_task
 from pac_cortex.client import HarnessClient, VmClient
 from pac_cortex.config import settings
 from pac_cortex.llm import LLMClient
+from pac_cortex.tracer import TaskTracer
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +23,7 @@ def run_session(task_filter: list[str] | None = None) -> list[dict]:
 
     tasks = harness.list_tasks(settings.benchmark_id)
     logger.info("Fetched %d tasks", len(tasks))
+    Path(settings.trace_dir).mkdir(exist_ok=True)
 
     for i, task in enumerate(tasks, 1):
         if task_filter and task.task_id not in task_filter:
@@ -30,9 +33,15 @@ def run_session(task_filter: list[str] | None = None) -> list[dict]:
         trial = harness.start_trial(settings.benchmark_id, task.task_id)
         logger.info("Trial %s | %s", trial.trial_id, trial.instruction[:80])
 
+        tracer = TaskTracer(
+            task_id=task.task_id,
+            trial_id=trial.trial_id,
+            instruction=trial.instruction,
+            trace_dir=settings.trace_dir,
+        )
         try:
             vm = VmClient(trial.harness_url)
-            solve_task(trial.instruction, vm, llm)
+            solve_task(trial.instruction, vm, llm, tracer=tracer)
         except (openai.APIError, ConnectError) as exc:
             logger.exception("Task %s failed (recoverable): %s", task.task_id, type(exc).__name__)
 
