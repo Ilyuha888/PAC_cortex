@@ -5,16 +5,26 @@ from pydantic import ValidationError
 
 from pac_cortex.agent import (
     _ALLOWED_TOOLS,
+    _PROMPT_ENTITY_INBOX,
     _SCHEMA_CORRECTION,
+    AssembledPrompt,
     NextStep,
     ReportTaskCompletion,
     ReqContext,
     ReqList,
     ReqRead,
     ReqTree,
+    _build_system_prompt,
     solve_task,
 )
 from pac_cortex.tracer import TaskTracer
+
+_ASSEMBLED_NO_ENTITY = AssembledPrompt(
+    include_entity_inbox=False, vocabulary={}, workspace_notes=""
+)
+_ASSEMBLED_WITH_ENTITY = AssembledPrompt(
+    include_entity_inbox=True, vocabulary={}, workspace_notes=""
+)
 
 
 def _make_validation_error() -> ValidationError:
@@ -25,10 +35,52 @@ def _make_validation_error() -> ValidationError:
     raise AssertionError("unreachable")
 
 
+# ---------------------------------------------------------------------------
+# _build_system_prompt unit tests
+# ---------------------------------------------------------------------------
+
+def test_build_system_prompt_excludes_entity_inbox_by_default() -> None:
+    prompt = _build_system_prompt(_ASSEMBLED_NO_ENTITY)
+    assert _PROMPT_ENTITY_INBOX.strip() not in prompt
+
+
+def test_build_system_prompt_includes_entity_inbox_when_requested() -> None:
+    prompt = _build_system_prompt(_ASSEMBLED_WITH_ENTITY)
+    assert "Entity & inbox rules" in prompt
+
+
+def test_build_system_prompt_appends_vocabulary() -> None:
+    assembled = AssembledPrompt(
+        include_entity_inbox=False,
+        vocabulary={"distill": "create a card and update the thread"},
+        workspace_notes="",
+    )
+    prompt = _build_system_prompt(assembled)
+    assert "distill: create a card and update the thread" in prompt
+
+
+def test_build_system_prompt_appends_workspace_notes() -> None:
+    assembled = AssembledPrompt(
+        include_entity_inbox=False,
+        vocabulary={},
+        workspace_notes="outbox/ present",
+    )
+    prompt = _build_system_prompt(assembled)
+    assert "outbox/ present" in prompt
+
+
+# ---------------------------------------------------------------------------
+# solve_task integration tests
+# Each test accounts for the pre-flight parse_step call (handled transparently
+# by the mock_llm_client fixture's _preflight_dispatch side_effect).
+# Tests using return_value: call_count = 1 (pre-flight) + N (main loop).
+# Tests using side_effect=[...]: must prepend AssembledPrompt as first element.
+# ---------------------------------------------------------------------------
+
 def test_immediate_report_completion(
     mock_vm_client: MagicMock, mock_llm_client: MagicMock
 ) -> None:
-    """Agent calls report_completion immediately → single LLM call, single vm.answer."""
+    """Agent calls report_completion immediately → one main LLM call, single vm.answer."""
     mock_llm_client.parse_step.return_value = NextStep(
         current_state="done",
         confidence="high",
@@ -45,7 +97,8 @@ def test_immediate_report_completion(
 
     solve_task("capture foo.md", mock_vm_client, mock_llm_client)
 
-    assert mock_llm_client.parse_step.call_count == 1
+    # 1 pre-flight call + 1 main loop call
+    assert mock_llm_client.parse_step.call_count == 2
     assert mock_vm_client.answer.call_count == 1
     mock_vm_client.answer.assert_called_once_with(
         message="Task complete",
@@ -68,9 +121,10 @@ def test_stagnation_triggers_err_internal(
 
     solve_task("find something", mock_vm_client, mock_llm_client)
 
-    # Stagnation fires after 3 identical calls; dispatch runs on steps 1 and 2 only
-    assert mock_llm_client.parse_step.call_count == 3
-    assert mock_vm_client.tree.call_count == 2
+    # 1 pre-flight + 3 main (stagnation fires after 3 identical calls)
+    assert mock_llm_client.parse_step.call_count == 4
+    # pre-flight calls vm.tree() + 2 main dispatches before stagnation abort
+    assert mock_vm_client.tree.call_count == 3
     assert mock_vm_client.answer.call_count == 1
     mock_vm_client.answer.assert_called_once_with(
         message="Agent stuck in repeated tool loop",
@@ -82,7 +136,8 @@ def test_step_budget_exhausted(
     mock_vm_client: MagicMock, mock_llm_client: MagicMock
 ) -> None:
     """Agent never calls report_completion → step budget fires OUTCOME_ERR_INTERNAL."""
-    # Alternate two different tool calls so stagnation window never triggers
+    # Alternate two different tool calls so stagnation window never triggers.
+    # Prepend AssembledPrompt for the pre-flight call.
     tree_step = NextStep(
         current_state="s",
         confidence="high",
@@ -97,11 +152,14 @@ def test_step_budget_exhausted(
         task_completed=False,
         function=ReqList(tool="list", path="/"),
     )
-    mock_llm_client.parse_step.side_effect = list(islice(cycle([tree_step, list_step]), 30))
+    mock_llm_client.parse_step.side_effect = (
+        [_ASSEMBLED_NO_ENTITY] + list(islice(cycle([tree_step, list_step]), 30))
+    )
 
     solve_task("find something", mock_vm_client, mock_llm_client)
 
-    assert mock_llm_client.parse_step.call_count == 30
+    # 1 pre-flight + 30 main
+    assert mock_llm_client.parse_step.call_count == 31
     mock_vm_client.answer.assert_called_once_with(
         message="Step budget exhausted",
         outcome="OUTCOME_ERR_INTERNAL",
@@ -126,11 +184,10 @@ def test_injection_in_tool_result_aborts_with_denied_security(
 
     solve_task("read foo.md", mock_vm_client, mock_llm_client)
 
-    # One LLM call — abort before second step
-    assert mock_llm_client.parse_step.call_count == 1
+    # 1 pre-flight + 1 main before abort
+    assert mock_llm_client.parse_step.call_count == 2
     mock_vm_client.answer.assert_called_once()
-    call_kwargs = mock_vm_client.answer.call_args
-    assert call_kwargs.kwargs["outcome"] == "OUTCOME_DENIED_SECURITY"
+    assert mock_vm_client.answer.call_args.kwargs["outcome"] == "OUTCOME_DENIED_SECURITY"
 
 
 def test_api_budget_exhausted(
@@ -138,7 +195,6 @@ def test_api_budget_exhausted(
 ) -> None:
     """Budget limit fires immediately when api_call_budget is tiny."""
     monkeypatch.setattr("pac_cortex.agent.settings.api_call_budget", 1)
-    # budget_limit = 1 - 50 = -49; after first LLM call api_calls=1 >= -49 → fires
     mock_llm_client.parse_step.return_value = NextStep(
         current_state="exploring",
         confidence="high",
@@ -159,11 +215,13 @@ def test_schema_parse_retry_exhausted(
 ) -> None:
     """ValidationError on every attempt → agent calls OUTCOME_ERR_INTERNAL after max retries."""
     ve = _make_validation_error()
-    mock_llm_client.parse_step.side_effect = [ve, ve, ve]
+    # Prepend AssembledPrompt for pre-flight; three VEs for the main loop retries.
+    mock_llm_client.parse_step.side_effect = [_ASSEMBLED_NO_ENTITY, ve, ve, ve]
 
     solve_task("do something", mock_vm_client, mock_llm_client)
 
-    assert mock_llm_client.parse_step.call_count == 3
+    # 1 pre-flight + 3 main retries
+    assert mock_llm_client.parse_step.call_count == 4
     mock_vm_client.answer.assert_called_once_with(
         message="Agent failed schema validation",
         outcome="OUTCOME_ERR_INTERNAL",
@@ -214,8 +272,9 @@ def test_schema_parse_retry_succeeds_on_second_attempt(
     """ValidationError on first attempt → _SCHEMA_CORRECTION injected → second attempt succeeds."""
     ve = _make_validation_error()
     mock_llm_client.parse_step.side_effect = [
-        ve,
-        NextStep(
+        _ASSEMBLED_NO_ENTITY,  # pre-flight
+        ve,                    # main step 1, first attempt
+        NextStep(              # main step 1, retry
             current_state="done",
             confidence="high",
             plan_remaining_steps_brief=["report"],
@@ -232,9 +291,11 @@ def test_schema_parse_retry_succeeds_on_second_attempt(
 
     solve_task("do something", mock_vm_client, mock_llm_client)
 
-    assert mock_llm_client.parse_step.call_count == 2
-    second_call_log = mock_llm_client.parse_step.call_args_list[1].args[0]
-    correction_msgs = [m for m in second_call_log if m.get("content") == _SCHEMA_CORRECTION]
+    # 1 pre-flight + 2 main (1 failed + 1 retry)
+    assert mock_llm_client.parse_step.call_count == 3
+    # The retry call (index 2) should have received _SCHEMA_CORRECTION
+    retry_call_log = mock_llm_client.parse_step.call_args_list[2].args[0]
+    correction_msgs = [m for m in retry_call_log if m.get("content") == _SCHEMA_CORRECTION]
     assert len(correction_msgs) == 1
     mock_vm_client.answer.assert_called_once_with(
         message="recovered", outcome="OUTCOME_OK", refs=[]
@@ -255,7 +316,8 @@ def test_path_traversal_in_tool_call_aborts_with_denied_security(
 
     solve_task("read something", mock_vm_client, mock_llm_client)
 
-    assert mock_llm_client.parse_step.call_count == 1
+    # 1 pre-flight + 1 main
+    assert mock_llm_client.parse_step.call_count == 2
     mock_vm_client.read.assert_not_called()
     mock_vm_client.answer.assert_called_once()
     assert mock_vm_client.answer.call_args.kwargs["outcome"] == "OUTCOME_DENIED_SECURITY"
@@ -267,6 +329,7 @@ def test_context_tool_dispatched(
     """When LLM emits ReqContext, vm.context() is called and result appended to log."""
     mock_vm_client.context.return_value = {"current_time": "2026-03-26T12:00:00Z"}
     mock_llm_client.parse_step.side_effect = [
+        _ASSEMBLED_WITH_ENTITY,  # pre-flight
         NextStep(
             current_state="gathering context",
             confidence="high",
@@ -292,10 +355,11 @@ def test_context_tool_dispatched(
     solve_task("process inbox email", mock_vm_client, mock_llm_client)
 
     mock_vm_client.context.assert_called_once()
-    assert mock_llm_client.parse_step.call_count == 2
-    # The context result should appear in the log passed to the second LLM call
-    second_call_log = mock_llm_client.parse_step.call_args_list[1].args[0]
-    tool_results = [m for m in second_call_log if m.get("role") == "tool"]
+    # 1 pre-flight + 2 main
+    assert mock_llm_client.parse_step.call_count == 3
+    # The context result must appear in the log passed to the third call (index 2)
+    third_call_log = mock_llm_client.parse_step.call_args_list[2].args[0]
+    tool_results = [m for m in third_call_log if m.get("role") == "tool"]
     assert any("current_time" in m.get("content", "") for m in tool_results)
     mock_vm_client.answer.assert_called_once_with(
         message="Task complete", outcome="OUTCOME_OK", refs=[]
@@ -306,11 +370,9 @@ def test_tool_not_in_allowlist_aborts_with_denied_security(
     mock_vm_client: MagicMock, mock_llm_client: MagicMock, monkeypatch
 ) -> None:
     """Tool name not in _ALLOWED_TOOLS aborts task with OUTCOME_DENIED_SECURITY."""
-    # Verify the allowlist is non-empty and we pick a name outside it
     unknown_tool = "shell_exec"
     assert unknown_tool not in _ALLOWED_TOOLS
 
-    # Patch validate_tool_call to simulate a tool name that slips past Pydantic
     import pac_cortex.agent as agent_mod
     original = agent_mod.validate_tool_call
 
@@ -331,7 +393,9 @@ def test_tool_not_in_allowlist_aborts_with_denied_security(
 
     solve_task("explore", mock_vm_client, mock_llm_client)
 
-    assert mock_llm_client.parse_step.call_count == 1
-    mock_vm_client.tree.assert_not_called()
+    # 1 pre-flight + 1 main (rejected by safety gate)
+    assert mock_llm_client.parse_step.call_count == 2
+    # Pre-flight calls vm.tree() directly (not through safety gate)
+    assert mock_vm_client.tree.call_count == 1
     mock_vm_client.answer.assert_called_once()
     assert mock_vm_client.answer.call_args.kwargs["outcome"] == "OUTCOME_DENIED_SECURITY"
