@@ -16,6 +16,7 @@ from bitgn.harness_pb2 import (
 from bitgn.vm.pcm_connect import PcmRuntimeClientSync
 from bitgn.vm.pcm_pb2 import (
     AnswerRequest,
+    ContextRequest,
     DeleteRequest,
     FindRequest,
     ListRequest,
@@ -167,6 +168,9 @@ class VmClient:
     def move(self, from_name: str, to_name: str) -> dict[str, Any]:
         req = MoveRequest(from_name=from_name, to_name=to_name)
         return self._call(lambda: self._vm.move(req))
+
+    def context(self) -> dict[str, Any]:
+        return self._call(lambda: self._vm.context(ContextRequest()))
 
     def answer(
         self, message: str, outcome: str, refs: list[str] | None = None

@@ -8,6 +8,7 @@ from pac_cortex.agent import (
     _SCHEMA_CORRECTION,
     NextStep,
     ReportTaskCompletion,
+    ReqContext,
     ReqList,
     ReqRead,
     ReqTree,
@@ -258,6 +259,47 @@ def test_path_traversal_in_tool_call_aborts_with_denied_security(
     mock_vm_client.read.assert_not_called()
     mock_vm_client.answer.assert_called_once()
     assert mock_vm_client.answer.call_args.kwargs["outcome"] == "OUTCOME_DENIED_SECURITY"
+
+
+def test_context_tool_dispatched(
+    mock_vm_client: MagicMock, mock_llm_client: MagicMock
+) -> None:
+    """When LLM emits ReqContext, vm.context() is called and result appended to log."""
+    mock_vm_client.context.return_value = {"current_time": "2026-03-26T12:00:00Z"}
+    mock_llm_client.parse_step.side_effect = [
+        NextStep(
+            current_state="gathering context",
+            confidence="high",
+            plan_remaining_steps_brief=["get current time"],
+            task_completed=False,
+            function=ReqContext(tool="context"),
+        ),
+        NextStep(
+            current_state="done",
+            confidence="high",
+            plan_remaining_steps_brief=["report"],
+            task_completed=True,
+            function=ReportTaskCompletion(
+                tool="report_completion",
+                completed_steps_laconic=["got context", "done"],
+                message="Task complete",
+                grounding_refs=[],
+                outcome="OUTCOME_OK",
+            ),
+        ),
+    ]
+
+    solve_task("process inbox email", mock_vm_client, mock_llm_client)
+
+    mock_vm_client.context.assert_called_once()
+    assert mock_llm_client.parse_step.call_count == 2
+    # The context result should appear in the log passed to the second LLM call
+    second_call_log = mock_llm_client.parse_step.call_args_list[1].args[0]
+    tool_results = [m for m in second_call_log if m.get("role") == "tool"]
+    assert any("current_time" in m.get("content", "") for m in tool_results)
+    mock_vm_client.answer.assert_called_once_with(
+        message="Task complete", outcome="OUTCOME_OK", refs=[]
+    )
 
 
 def test_tool_not_in_allowlist_aborts_with_denied_security(

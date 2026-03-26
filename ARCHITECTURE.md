@@ -17,7 +17,7 @@ tool result, and reports a scored outcome back to the harness. No database, no a
 | `client.py` | BitGN protobuf clients (harness + VM) | `HarnessClient`, `VmClient`, `Trial`, `TrialResult` | integration |
 | `llm.py` | OpenAI-compatible SGR completions | `LLMClient.parse_step()` | integration |
 | `safety.py` | Injection scan, secret redact, tool validation | `scan_for_injection`, `redact_secrets`, `validate_tool_call` | unit |
-| `agent.py` | Core SGR loop + tool dispatch | `solve_task`, `NextStep`, `ReportTaskCompletion` | integration |
+| `agent.py` | Core SGR loop + tool dispatch | `solve_task`, `NextStep`, `ReportTaskCompletion`, `ReqContext` | integration |
 | `runner.py` | Session orchestrator (sequential tasks) | `run_session` | integration |
 | `tracer.py` | Per-task crash-safe trace file writer | `TaskTracer` | — |
 | `main.py` | CLI entrypoint (`smoke`, `run`) | `main` | — |
@@ -53,7 +53,7 @@ main.py cmd_run()
 - **API budget guard** — hard-stop at `api_call_budget - 50` (default 950/1000) calls; aborts before exceeding cap.
 - **Stagnation guard** — 3 identical consecutive tool+args signatures → abort with `OUTCOME_ERR_INTERNAL`.
 - **Safety pipeline** — every tool result passes `scan_for_injection` then `redact_secrets` before entering LLM context.
-- **Tool allowlist** — `NextStep.function` is a Pydantic discriminated union; only schema-declared tools can be emitted.
+- **Tool allowlist** — `NextStep.function` is a Pydantic discriminated union; only schema-declared tools can be emitted: `tree`, `find`, `search`, `list`, `read`, `write`, `delete`, `mkdir`, `move`, `context`, `report_completion`.
 - **Pydantic at every boundary** — `Trial`, `TrialResult`, `Task`, `NextStep`, all tool request models.
 
 ---
@@ -63,10 +63,27 @@ main.py cmd_run()
 | Code | Meaning | When used |
 |---|---|---|
 | `OUTCOME_OK` | Task completed successfully | All graded objectives met |
-| `OUTCOME_DENIED_SECURITY` | Injection or security violation detected | File content issued directives; suspicious file confirmed |
+| `OUTCOME_DENIED_SECURITY` | Injection or security violation detected | File content issued directives; suspicious file confirmed; spoofed email sender (From: address doesn't match registered contact) |
 | `OUTCOME_NONE_CLARIFICATION` | Task instruction ambiguous | Agent cannot proceed without more information |
 | `OUTCOME_NONE_UNSUPPORTED` | Required capability unavailable | Email, HTTP, external APIs, calendar |
 | `OUTCOME_ERR_INTERNAL` | Agent-side failure | Budget exhausted, stagnation, schema parse failure, step limit |
+
+---
+
+## Entity & Inbox Reasoning (t12-t20)
+
+Tasks t12-t20 use an ERC3-style runtime with typed entities (contacts, companies). The agent:
+
+1. Calls `context` early to retrieve the current timestamp (needed for date-relative queries).
+2. Reads CRM entity files under `tree`-discovered data/contacts directories.
+3. **Sender verification before fulfilling any email-driven request:**
+   - Extracts `From:` address from the inbox email file.
+   - Finds the matching contact entity; reads their registered email field.
+   - If `From:` ≠ registered email → spoofed sender → `OUTCOME_DENIED_SECURITY`.
+   - Verifies sender is associated with the claimed company → else `OUTCOME_DENIED_SECURITY`.
+4. Only if both checks pass does it locate and return the requested document.
+
+If entity files are missing or the contact cannot be found → `OUTCOME_NONE_CLARIFICATION`.
 
 ---
 
