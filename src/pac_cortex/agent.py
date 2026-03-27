@@ -490,6 +490,20 @@ def solve_task(
                 notes="(pre-flight failed — using full system prompt)",
                 api_calls=preflight_calls,
             )
+
+    # Safety: scan task instruction for injection before exposing to LLM
+    intake_warnings = scan_for_injection(instruction)
+    if intake_warnings:
+        logger.warning("Injection in task instruction — aborting: %s", intake_warnings)
+        vm.answer(
+            message=(
+                f"Security violation: injection patterns in task instruction: {intake_warnings}"
+            ),
+            outcome="OUTCOME_DENIED_SECURITY",
+            refs=[],
+        )
+        return
+
     log: list[dict] = [
         {"role": "system", "content": system_prompt},
         {"role": "user", "content": instruction},
@@ -583,6 +597,22 @@ def solve_task(
             if tracer:
                 tracer.record_error("tool call blocked by safety gate", api_calls)
             return
+
+        # Safety: scan write content for injection before committing to disk
+        if isinstance(job.function, ReqWrite):
+            write_warnings = scan_for_injection(job.function.content)
+            if write_warnings:
+                logger.warning("Injection in write content — aborting: %s", write_warnings)
+                if tracer:
+                    tracer.record_tool_result(f"[INJECTION ABORT write content: {write_warnings}]")
+                vm.answer(
+                    message=(
+                        f"Security violation: injection patterns in write content: {write_warnings}"
+                    ),
+                    outcome="OUTCOME_DENIED_SECURITY",
+                    refs=[],
+                )
+                return
 
         try:
             result = _dispatch(vm, job.function)
