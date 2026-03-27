@@ -3,6 +3,7 @@
 from unittest.mock import MagicMock, patch
 
 import pytest
+from connectrpc.code import Code as _ConnectCode
 
 from pac_cortex.client import HarnessClient, Task, Trial, TrialResult, VmClient
 
@@ -10,7 +11,7 @@ from pac_cortex.client import HarnessClient, Task, Trial, TrialResult, VmClient
 class _ConnectError(Exception):
     """Fake ConnectError for patching connectrpc.errors.ConnectError."""
 
-    code = "unavailable"
+    code = _ConnectCode.UNAVAILABLE
     message = "server down"
 
 

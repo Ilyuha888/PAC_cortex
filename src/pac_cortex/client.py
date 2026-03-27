@@ -28,6 +28,7 @@ from bitgn.vm.pcm_pb2 import (
     TreeRequest,
     WriteRequest,
 )
+from connectrpc.code import Code as _ConnectCode
 from connectrpc.errors import ConnectError
 from google.protobuf.json_format import MessageToDict
 from pydantic import BaseModel
@@ -35,6 +36,15 @@ from pydantic import BaseModel
 from pac_cortex.config import settings as _settings
 
 logger = logging.getLogger(__name__)
+
+# ConnectRPC error codes that are transient and worth retrying.
+# Deterministic codes (NOT_FOUND, INVALID_ARGUMENT, PERMISSION_DENIED, …) are not retried.
+_TRANSIENT_CODES = {
+    _ConnectCode.UNAVAILABLE,
+    _ConnectCode.DEADLINE_EXCEEDED,
+    _ConnectCode.UNKNOWN,
+    _ConnectCode.INTERNAL,
+}
 
 # ---------------------------------------------------------------------------
 # Typed boundary models
@@ -131,7 +141,7 @@ class VmClient:
                     logger.warning(
                         "VmClient ConnectError %s %s (attempt %d)", exc.code, exc.message, attempt
                     )
-                    if attempt == retries:
+                    if attempt == retries or exc.code not in _TRANSIENT_CODES:
                         raise
             time.sleep(2.0 ** attempt)
         raise RuntimeError("VmClient._call exhausted retries")  # unreachable
