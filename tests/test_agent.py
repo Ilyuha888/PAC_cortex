@@ -23,12 +23,8 @@ from pac_cortex.client import VmClient
 from pac_cortex.llm import LLMClient
 from pac_cortex.tracer import TaskTracer
 
-_ASSEMBLED_NO_ENTITY = AssembledPrompt(
-    include_entity_inbox=False, vocabulary={}, workspace_notes=""
-)
-_ASSEMBLED_WITH_ENTITY = AssembledPrompt(
-    include_entity_inbox=True, vocabulary={}, workspace_notes=""
-)
+_ASSEMBLED_NO_ENTITY = AssembledPrompt(include_entity_inbox=False, vocabulary={})
+_ASSEMBLED_WITH_ENTITY = AssembledPrompt(include_entity_inbox=True, vocabulary={})
 
 
 def _make_validation_error() -> ValidationError:
@@ -57,20 +53,43 @@ def test_build_system_prompt_appends_vocabulary() -> None:
     assembled = AssembledPrompt(
         include_entity_inbox=False,
         vocabulary={"distill": "create a card and update the thread"},
-        workspace_notes="",
     )
     prompt = _build_system_prompt(assembled)
     assert "distill: create a card and update the thread" in prompt
 
 
-def test_build_system_prompt_appends_workspace_notes() -> None:
+def test_preflight_protected_paths_appear_in_prompt() -> None:
     assembled = AssembledPrompt(
         include_entity_inbox=False,
         vocabulary={},
-        workspace_notes="outbox/ present",
+        protected_paths=["_archive"],
     )
     prompt = _build_system_prompt(assembled)
-    assert "outbox/ present" in prompt
+    assert "Protected paths" in prompt
+    assert "_archive" in prompt
+
+
+def test_preflight_workflow_constraints_appear_in_prompt() -> None:
+    assembled = AssembledPrompt(
+        include_entity_inbox=False,
+        vocabulary={},
+        workflow_constraints=["outbox/ requires reading seq.json before any write"],
+    )
+    prompt = _build_system_prompt(assembled)
+    assert "Workspace constraints" in prompt
+    assert "seq.json" in prompt
+
+
+def test_preflight_capture_subfolders_appear_in_prompt() -> None:
+    assembled = AssembledPrompt(
+        include_entity_inbox=False,
+        vocabulary={},
+        capture_subfolders=["influential", "reference"],
+    )
+    prompt = _build_system_prompt(assembled)
+    assert "Capture subfolders" in prompt
+    assert "influential" in prompt
+    assert "reference" in prompt
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +446,7 @@ def _make_llm(assembled: AssembledPrompt) -> MagicMock:
 
 def test_preflight_email_task_sets_entity_inbox() -> None:
     """Task with 'email' keyword → include_entity_inbox=True in assembled prompt."""
-    assembled = AssembledPrompt(include_entity_inbox=True, vocabulary={}, workspace_notes="")
+    assembled = AssembledPrompt(include_entity_inbox=True, vocabulary={})
     vm = _make_vm()
     llm = _make_llm(assembled)
 
@@ -441,7 +460,7 @@ def test_preflight_email_task_sets_entity_inbox() -> None:
 
 def test_preflight_no_crm_task_excludes_entity_inbox() -> None:
     """Task with no CRM keywords + empty tree → include_entity_inbox=False."""
-    assembled = AssembledPrompt(include_entity_inbox=False, vocabulary={}, workspace_notes="")
+    assembled = AssembledPrompt(include_entity_inbox=False, vocabulary={})
     vm = _make_vm()
     llm = _make_llm(assembled)
 
@@ -470,7 +489,6 @@ def test_preflight_vocabulary_appears_in_system_prompt() -> None:
     assembled = AssembledPrompt(
         include_entity_inbox=False,
         vocabulary={"distill": "synthesize and create a card"},
-        workspace_notes="",
     )
     vm = _make_vm(tree_entries=tree_entries, agents_md_content="distill = synthesize")
     llm = _make_llm(assembled)

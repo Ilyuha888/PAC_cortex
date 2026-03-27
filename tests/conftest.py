@@ -7,7 +7,7 @@ from pac_cortex.client import VmClient
 from pac_cortex.llm import LLMClient
 
 _DEFAULT_ASSEMBLED = AssembledPrompt(
-    include_entity_inbox=False, vocabulary={}, workspace_notes=""
+    include_entity_inbox=False, vocabulary={}
 )
 
 
