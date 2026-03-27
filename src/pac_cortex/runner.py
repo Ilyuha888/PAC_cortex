@@ -42,7 +42,7 @@ def run_session(task_filter: list[str] | None = None) -> list[dict]:
         try:
             vm = VmClient(trial.harness_url)
             solve_task(trial.instruction, vm, llm, tracer=tracer)
-        except (openai.APIError, ConnectError) as exc:
+        except (openai.APIError, ConnectError, RuntimeError) as exc:
             logger.exception("Task %s failed (recoverable): %s", task.task_id, type(exc).__name__)
 
         trial_result = harness.end_trial(trial.trial_id)

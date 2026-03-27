@@ -71,5 +71,12 @@ class LLMClient:
                 delay = 2.0 ** attempt
                 logger.warning("API error %s — retrying in %.0fs", exc, delay)
                 time.sleep(delay)
+            except TypeError as exc:
+                # Proxy returned malformed response (e.g. choices=None)
+                if attempt == _MAX_RETRIES:
+                    raise RuntimeError(f"LLM returned malformed response: {exc}") from exc
+                delay = 2.0 ** attempt
+                logger.warning("Malformed LLM response — retry in %.0fs (%d)", delay, attempt + 1)
+                time.sleep(delay)
 
         raise RuntimeError("parse_step exhausted retries")  # unreachable
