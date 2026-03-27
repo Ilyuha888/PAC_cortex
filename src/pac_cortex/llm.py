@@ -40,6 +40,7 @@ class LLMClient:
         messages: list[dict[str, Any]],
         response_format: type[T],
         max_completion_tokens: int = 16384,
+        extra_body: dict[str, Any] | None = None,
     ) -> T:
         for attempt in range(_MAX_RETRIES + 1):
             try:
@@ -48,6 +49,7 @@ class LLMClient:
                     messages=messages,  # type: ignore[arg-type]
                     response_format=response_format,
                     max_completion_tokens=max_completion_tokens,
+                    extra_body=extra_body,
                 )
                 usage = resp.usage
                 if usage:

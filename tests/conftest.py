@@ -37,7 +37,9 @@ def mock_llm_client() -> MagicMock:
     # Return a neutral default so tests only need to configure NextStep responses.
     # Tests that override side_effect with a list must prepend an AssembledPrompt
     # as the first element to account for the pre-flight call.
-    def _preflight_dispatch(messages, response_format, max_completion_tokens=16384):
+    def _preflight_dispatch(
+        messages, response_format, max_completion_tokens=16384, extra_body=None
+    ):
         if response_format is AssembledPrompt:
             return _DEFAULT_ASSEMBLED
         return DEFAULT  # tells MagicMock to use configured return_value

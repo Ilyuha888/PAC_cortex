@@ -264,7 +264,12 @@ def _preflight(instruction: str, vm: VmClient, llm: LLMClient) -> tuple[str, int
                 f"AGENTS.md:\n{agents_md if agents_md else '(not present)'}"
             )},
         ]
-        assembled = llm.parse_step(messages, AssembledPrompt, max_completion_tokens=4096)
+        assembled = llm.parse_step(
+            messages,
+            AssembledPrompt,
+            max_completion_tokens=4096,
+            extra_body={"thinking_config": {"thinking_budget": 0}},
+        )
         api_calls += 1
         logger.debug(
             "Pre-flight: include_entity_inbox=%s vocab_terms=%d workspace_notes=%r",
@@ -435,7 +440,11 @@ def solve_task(
         job: NextStep | None = None
         for parse_attempt in range(_MAX_PARSE_RETRIES + 1):
             try:
-                job = llm.parse_step(log, NextStep)
+                job = llm.parse_step(
+                    log,
+                    NextStep,
+                    extra_body={"thinking_config": {"thinking_budget": 0}},
+                )
                 api_calls += 1
                 logger.debug("step=%d confidence=%s", step_num + 1, job.confidence)
                 break
