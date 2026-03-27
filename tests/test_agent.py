@@ -7,6 +7,7 @@ from pac_cortex.agent import (
     _ALLOWED_TOOLS,
     _PROMPT_ENTITY_INBOX,
     _SCHEMA_CORRECTION,
+    _SYSTEM_PROMPT_FULL,
     AssembledPrompt,
     NextStep,
     ReportTaskCompletion,
@@ -15,8 +16,11 @@ from pac_cortex.agent import (
     ReqRead,
     ReqTree,
     _build_system_prompt,
+    _preflight,
     solve_task,
 )
+from pac_cortex.client import VmClient
+from pac_cortex.llm import LLMClient
 from pac_cortex.tracer import TaskTracer
 
 _ASSEMBLED_NO_ENTITY = AssembledPrompt(
@@ -261,6 +265,7 @@ def test_tracer_writes_file(
     assert "task-test" in content
     assert "abcd1234" in content
     assert "Do the thing" in content
+    assert "Pre-flight:" in content
     assert "--- Step 1 ---" in content
     assert "OUTCOME_OK" in content
     assert "=== COMPLETED ===" in content
@@ -399,3 +404,80 @@ def test_tool_not_in_allowlist_aborts_with_denied_security(
     assert mock_vm_client.tree.call_count == 1
     mock_vm_client.answer.assert_called_once()
     assert mock_vm_client.answer.call_args.kwargs["outcome"] == "OUTCOME_DENIED_SECURITY"
+
+
+# ---------------------------------------------------------------------------
+# _preflight unit tests
+# ---------------------------------------------------------------------------
+
+def _make_vm(tree_entries: list | None = None, agents_md_content: str | None = None) -> MagicMock:
+    vm = MagicMock(spec=VmClient)
+    entries = tree_entries if tree_entries is not None else []
+    vm.tree.return_value = {"entries": entries}
+    if agents_md_content is not None:
+        vm.read.return_value = {"content": agents_md_content}
+    return vm
+
+
+def _make_llm(assembled: AssembledPrompt) -> MagicMock:
+    llm = MagicMock(spec=LLMClient)
+    llm.parse_step.return_value = assembled
+    return llm
+
+
+def test_preflight_email_task_sets_entity_inbox() -> None:
+    """Task with 'email' keyword → include_entity_inbox=True in assembled prompt."""
+    assembled = AssembledPrompt(include_entity_inbox=True, vocabulary={}, workspace_notes="")
+    vm = _make_vm()
+    llm = _make_llm(assembled)
+
+    system_prompt, api_calls, result = _preflight("send email to John", vm, llm)
+
+    assert result is not None
+    assert result.include_entity_inbox is True
+    assert "Entity & inbox rules" in system_prompt
+    assert api_calls >= 1
+
+
+def test_preflight_no_crm_task_excludes_entity_inbox() -> None:
+    """Task with no CRM keywords + empty tree → include_entity_inbox=False."""
+    assembled = AssembledPrompt(include_entity_inbox=False, vocabulary={}, workspace_notes="")
+    vm = _make_vm()
+    llm = _make_llm(assembled)
+
+    system_prompt, _api_calls, result = _preflight("capture the note", vm, llm)
+
+    assert result is not None
+    assert result.include_entity_inbox is False
+    assert "Entity & inbox rules" not in system_prompt
+
+
+def test_preflight_llm_failure_returns_full_prompt() -> None:
+    """LLM parse_step failure → fallback to _SYSTEM_PROMPT_FULL, None assembled."""
+    vm = _make_vm()
+    llm = MagicMock(spec=LLMClient)
+    llm.parse_step.side_effect = RuntimeError("LLM unavailable")
+
+    system_prompt, _api_calls, result = _preflight("do something", vm, llm)
+
+    assert result is None
+    assert system_prompt == _SYSTEM_PROMPT_FULL
+
+
+def test_preflight_vocabulary_appears_in_system_prompt() -> None:
+    """Vocabulary extracted from AGENTS.md appears in the assembled system prompt."""
+    tree_entries = [{"name": "AGENTS.md", "type": "file", "path": "AGENTS.md"}]
+    assembled = AssembledPrompt(
+        include_entity_inbox=False,
+        vocabulary={"distill": "synthesize and create a card"},
+        workspace_notes="",
+    )
+    vm = _make_vm(tree_entries=tree_entries, agents_md_content="distill = synthesize")
+    llm = _make_llm(assembled)
+
+    system_prompt, _api_calls, result = _preflight("distill the note", vm, llm)
+
+    assert result is not None
+    assert "distill: synthesize and create a card" in system_prompt
+    # AGENTS.md was present in tree → vm.read() was called to fetch it
+    vm.read.assert_called_once()

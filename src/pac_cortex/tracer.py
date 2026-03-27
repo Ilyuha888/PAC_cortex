@@ -34,6 +34,18 @@ class TaskTracer:
         self._file.write(text)
         self._file.flush()
 
+    def record_preflight(
+        self,
+        include_entity_inbox: bool,
+        vocab_terms: int,
+        notes: str,
+        api_calls: int,
+    ) -> None:
+        self._write(
+            f"Pre-flight: entity_inbox={include_entity_inbox} vocab_terms={vocab_terms} "
+            f"notes={notes!r} api_calls={api_calls}\n"
+        )
+
     def record_step(
         self,
         step_num: int,
