@@ -184,6 +184,13 @@ _SCHEMA_CORRECTION = (
 
 _MAX_PARSE_RETRIES = 2
 
+_SCHEDULING_KEYWORDS: frozenset[str] = frozenset(
+    {"reschedule", "schedule", "follow-up", "followup", "reminder",
+     "appointment", "due", "meeting", "reconnect"}
+)
+_ENTITY_SRC_DIRS: tuple[str, ...] = ("reminders", "appointments", "tasks")
+_ENTITY_DST_DIRS: tuple[str, ...] = ("accounts", "contacts")
+
 
 # ---------------------------------------------------------------------------
 # Pre-flight: prompt assembly
@@ -208,6 +215,10 @@ class AssembledPrompt(BaseModel):
     capture_subfolders: list[str] = Field(
         default_factory=list,
         description="Subdirectories under 01_capture/ (or equivalent capture dir).",
+    )
+    workspace_notes: str = Field(
+        default="",
+        description="Extra task-specific notes appended by pre-flight logic.",
     )
 
 
@@ -235,7 +246,92 @@ def _build_system_prompt(assembled: AssembledPrompt) -> str:
             f"\nCapture subfolders: {subs} — "
             f"choose the correct subfolder, do NOT drop files to the capture root.\n"
         )
+    if assembled.workspace_notes:
+        prompt += f"\nTask notes:\n{assembled.workspace_notes}\n"
     return prompt
+
+
+def _discover_entity_links(instruction: str, vm: VmClient, tree_str: str) -> str:
+    """Return a specific workspace note naming cross-resource scheduling links.
+
+    Searches at most one entity file per source dir (limit=1, best match).
+    Output is bounded regardless of workspace size.
+    Returns "" if task is not scheduling-related or no links found.
+    """
+    if not any(kw in instruction.lower() for kw in _SCHEDULING_KEYWORDS):
+        logger.debug("_discover_entity_links: no scheduling keyword in instruction")
+        return ""
+
+    src_dirs = [d for d in _ENTITY_SRC_DIRS if f'"name": "{d}"' in tree_str]
+    dst_dirs = [d for d in _ENTITY_DST_DIRS if f'"name": "{d}"' in tree_str]
+    logger.debug("_discover_entity_links: src_dirs=%s dst_dirs=%s", src_dirs, dst_dirs)
+    if not src_dirs or not dst_dirs:
+        return ""
+
+    # Extract entity keyword: leading run of capitalized words (e.g. "Nordlicht Health")
+    keyword_words: list[str] = []
+    for word in instruction.split():
+        cleaned = word.strip(".,!?;:'\"")
+        if cleaned and cleaned[0].isupper():
+            keyword_words.append(cleaned)
+        elif keyword_words:
+            break  # stop at first non-capitalized word after run
+    keyword = " ".join(keyword_words[:3]) if keyword_words else instruction[:40]
+
+    notes: list[str] = []
+    for src_dir in src_dirs:
+        try:
+            results = vm.search(keyword, root=src_dir, limit=5)
+            logger.debug("_discover_entity_links: search(%r, %s) → %s", keyword, src_dir, results)
+            for match in (results.get("matches") or []):
+                path = match.get("path", "")
+                if not path.endswith(".json"):
+                    continue
+                file_data = vm.read(path)
+                data = json.loads(file_data.get("content", "{}"))
+                # Collect date values in source file for cross-reference
+                src_dates = {
+                    v for v in data.values()
+                    if isinstance(v, str) and len(v) == 10 and v[4:5] == "-"
+                }
+                for key, val in data.items():
+                    if not (key.endswith("_id") and isinstance(val, str)):
+                        continue
+                    entity_type = key.removesuffix("_id")
+                    linked = f"{entity_type}s/{val}.json"
+                    if f'"name": "{val}.json"' not in tree_str:
+                        continue
+                    # Read linked file to find specific fields that mirror source dates
+                    try:
+                        linked_data = json.loads(vm.read(linked).get("content", "{}"))
+                        mirror_fields = [
+                            k for k, v in linked_data.items()
+                            if isinstance(v, str) and v in src_dates
+                        ]
+                    except Exception:
+                        mirror_fields = []
+                    if mirror_fields:
+                        fields_str = ", ".join(f"`{f}`" for f in mirror_fields)
+                        notes.append(
+                            f"{path} ({key}: {val}) → {linked}"
+                            f" (mirror date changes in: {fields_str})"
+                        )
+                    else:
+                        notes.append(f"{path} ({key}: {val}) → {linked}")
+                if notes:
+                    break  # one file with links per source dir is enough
+        except Exception as exc:
+            logger.debug("_discover_entity_links: exception for %s: %s", src_dir, exc)
+            continue
+
+    if not notes:
+        return ""
+    return (
+        "Call `context` to get the current date before computing any date offset. "
+        "Scheduling entity links: "
+        + "; ".join(notes)
+        + " — read and write each linked file, updating the mirrored date fields to match."
+    )
 
 
 def _preflight(
@@ -249,11 +345,19 @@ def _preflight(
     prompt — AGENTS.md content can only reach the main agent as sanitized JSON values.
     """
     api_calls = 0
+
+    # Stage 1: get workspace tree (required for both assembler and entity discovery)
     try:
         tree_result = vm.tree()
         api_calls += 1
         tree_str = json.dumps(tree_result, indent=2)
+    except Exception as exc:
+        logger.warning("Pre-flight tree failed (%s) — using full system prompt", exc)
+        return _SYSTEM_PROMPT_FULL, api_calls, None
 
+    # Stage 2: run assembler LLM (optional — falls back to full prompt on failure)
+    assembled: AssembledPrompt | None = None
+    try:
         agents_md = ""
         if "AGENTS.md" in tree_str or "AGENTS.MD" in tree_str:
             try:
@@ -274,22 +378,38 @@ def _preflight(
         assembled = llm.parse_step(
             messages,
             AssembledPrompt,
-            max_completion_tokens=4096,
+            max_completion_tokens=8192,
             extra_body={"thinking_config": {"thinking_budget": 0}},
         )
         api_calls += 1
+    except Exception as exc:
+        logger.warning("Pre-flight assembler failed (%s) — using full system prompt", exc)
+
+    # Stage 3: entity link discovery (runs regardless of assembler outcome)
+    links_note = _discover_entity_links(instruction, vm, tree_str)
+    if links_note:
+        api_calls += 2  # search + read
+        if assembled is not None:
+            combined = (assembled.workspace_notes + "\n" + links_note).strip()
+            assembled = assembled.model_copy(update={"workspace_notes": combined})
+
+    if assembled is not None:
         logger.debug(
-            "Pre-flight: entity_inbox=%s vocab=%d protected=%d constraints=%d capture_subs=%d",
+            "Pre-flight: entity_inbox=%s vocab=%d protected=%d "
+            "constraints=%d capture_subs=%d notes=%d",
             assembled.include_entity_inbox,
             len(assembled.vocabulary),
             len(assembled.protected_paths),
             len(assembled.workflow_constraints),
             len(assembled.capture_subfolders),
+            len(assembled.workspace_notes),
         )
         return _build_system_prompt(assembled), api_calls, assembled
-    except Exception as exc:
-        logger.warning("Pre-flight failed (%s) — using full system prompt", exc)
-        return _SYSTEM_PROMPT_FULL, api_calls, None
+
+    # Assembler failed — use full prompt, optionally appending entity link note
+    if links_note:
+        return _SYSTEM_PROMPT_FULL + f"\nTask notes:\n{links_note}\n", api_calls, None
+    return _SYSTEM_PROMPT_FULL, api_calls, None
 
 
 # ---------------------------------------------------------------------------
