@@ -264,7 +264,7 @@ def _preflight(instruction: str, vm: VmClient, llm: LLMClient) -> tuple[str, int
                 f"AGENTS.md:\n{agents_md if agents_md else '(not present)'}"
             )},
         ]
-        assembled = llm.parse_step(messages, AssembledPrompt, max_completion_tokens=512)
+        assembled = llm.parse_step(messages, AssembledPrompt, max_completion_tokens=4096)
         api_calls += 1
         logger.debug(
             "Pre-flight: include_entity_inbox=%s vocab_terms=%d workspace_notes=%r",
