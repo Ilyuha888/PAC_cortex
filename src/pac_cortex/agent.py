@@ -69,6 +69,17 @@ Operational rules:
   3. `delete` the source
 - `move`: provide full paths including filename for both from_name and to_name.
 - FILENAME: when creating a distill card, use the EXACT source filename — no renaming.
+- DISTILL workflow: when the task says "distill" or "create a card", complete both
+  steps — both are required:
+  1. Write the card to 02_distill/cards/ using the exact source filename.
+  2. Run `tree` with root=`02_distill/threads/` to list all thread files.
+     (`tree` here, not `find` — `find` searches filenames and misses topic matches.)
+     Read each file whose name does not start with `_` — read first, judge relevance
+     after. Pick the most topically relevant one and append a backlink line — e.g.
+       `- [card](../cards/2026-03-23__hn-example.md)`
+     If no non-template file exists, skip this step. Do not create a new thread file.
+- Thread-only tasks: when the task says "update thread" without "distill", modify
+  02_distill/threads/ directly — no card creation needed.
 - SCHEMA: before writing a new file where others of the same type already exist, read one
   existing file to learn the exact field names and structure.
 - Call `report_completion` when done or blocked:
@@ -160,8 +171,9 @@ protected_paths — list every file or directory whose name starts with an under
 workflow_constraints — check the tree for these patterns and include the matching rule:
   - outbox/ present → "outbox/ requires reading seq.json before any write to get the
     next message ID — never hardcode or guess an outbox file ID"
-  - 02_distill/threads/ present → "thread files in 02_distill/threads/ require a
-    corresponding card in 02_distill/cards/ — verify or create the card first"
+  - 02_distill/threads/ present → "distill tasks require a thread backlink — after
+    writing the card, run tree on 02_distill/threads/, read the non-template files,
+    and append a backlink in the most relevant one"
   - reminders/ or follow-ups/ present alongside contacts/ or accounts/ → "entries in
     reminders/ (or follow-ups/) may reference contacts/ or accounts/ via account_id or
     contact_id fields — read linked entities when updating time-sensitive records"
