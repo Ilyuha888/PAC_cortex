@@ -6,7 +6,7 @@ Solves tasks in a deterministic simulated environment via API. Scored on correct
 
 ## Status
 
-Fully operational. SDK integration complete; agent runs the full SGR loop against the BitGN benchmark harness.
+**20/22 (90.9%)** on BitGN benchmark. SDK integration complete; agent runs the full SGR loop against the harness.
 
 ## Setup
 
@@ -50,7 +50,10 @@ uv run pytest
 See [ARCHITECTURE.md](ARCHITECTURE.md) for system design, module map, control flow, and invariants.
 
 - Stateless per-task, single process, no database
-- ~1000 API calls/task budget with hard guard
+- ~1000 API calls/task budget with hard guard; 50-step agent loop
 - Sequential task execution
+- **Pre-flight assembler**: separate LLM call analyzes workspace tree + AGENTS.md, produces structured config (vocabulary, constraints, hierarchy conflict detection, task contract)
+- **TaskContract dispatch enforcement**: assembler classifies what's allowed, Python code blocks violations before execution (inbox deletion, premature reads, out-of-scope deletes)
 - All tool calls validated against allowlist
-- Tool results scanned for injection attempts
+- Tool results scanned for injection attempts; write content scanned before execution
+- Secret redaction on all tool results before LLM context
