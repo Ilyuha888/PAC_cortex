@@ -12,11 +12,14 @@ from pac_cortex.agent import (
     NextStep,
     ReportTaskCompletion,
     ReqContext,
+    ReqDelete,
     ReqList,
     ReqRead,
     ReqTree,
     ReqWrite,
+    TaskContract,
     _build_system_prompt,
+    _enforce_contract,
     _preflight,
     solve_task,
 )
@@ -177,13 +180,13 @@ def test_step_budget_exhausted(
         function=ReqList(tool="list", path="/"),
     )
     mock_llm_client.parse_step.side_effect = (
-        [_ASSEMBLED_NO_ENTITY] + list(islice(cycle([tree_step, list_step]), 30))
+        [_ASSEMBLED_NO_ENTITY] + list(islice(cycle([tree_step, list_step]), 50))
     )
 
     solve_task("find something", mock_vm_client, mock_llm_client)
 
-    # 1 pre-flight + 30 main
-    assert mock_llm_client.parse_step.call_count == 31
+    # 1 pre-flight + 50 main
+    assert mock_llm_client.parse_step.call_count == 51
     mock_vm_client.answer.assert_called_once_with(
         message="Step budget exhausted",
         outcome="OUTCOME_ERR_INTERNAL",
@@ -481,7 +484,8 @@ def test_preflight_llm_failure_returns_full_prompt() -> None:
     system_prompt, _api_calls, result = _preflight("do something", vm, llm)
 
     assert result is None
-    assert system_prompt == _SYSTEM_PROMPT_FULL
+    assert system_prompt.startswith(_SYSTEM_PROMPT_FULL)
+    assert "Workspace snapshot:" in system_prompt
 
 
 def test_preflight_vocabulary_appears_in_system_prompt() -> None:
@@ -541,3 +545,135 @@ def test_injection_in_write_content_aborts_with_denied_security(
     mock_vm_client.write.assert_not_called()
     mock_vm_client.answer.assert_called_once()
     assert mock_vm_client.answer.call_args.kwargs["outcome"] == "OUTCOME_DENIED_SECURITY"
+
+
+# ---------------------------------------------------------------------------
+# _enforce_contract unit tests
+# ---------------------------------------------------------------------------
+
+def test_contract_blocks_inbox_delete_when_unauthorized() -> None:
+    """ReqDelete on inbox path blocked when inbox_delete_authorized=False."""
+    contract = TaskContract(inbox_delete_authorized=False)
+    cmd = ReqDelete(tool="delete", path="inbox/msg_001.txt")
+    result = _enforce_contract(cmd, contract, [])
+    assert result is not None
+    assert "inbox file deletion not authorized" in result
+
+
+def test_contract_allows_inbox_delete_when_authorized() -> None:
+    """ReqDelete on inbox path allowed when inbox_delete_authorized=True."""
+    contract = TaskContract(inbox_delete_authorized=True)
+    cmd = ReqDelete(tool="delete", path="inbox/msg_001.txt")
+    result = _enforce_contract(cmd, contract, [])
+    assert result is None
+
+
+def test_contract_blocks_inbox_read_without_filename_scan() -> None:
+    """ReqRead on inbox path blocked without 'filename_scan' in checks_completed."""
+    contract = TaskContract(inbox_read_requires_filename_scan=True)
+    cmd = ReqRead(tool="read", path="inbox/msg_001.txt")
+    result = _enforce_contract(cmd, contract, [])
+    assert result is not None
+    assert "filename_scan" in result
+
+
+def test_contract_allows_inbox_read_after_filename_scan() -> None:
+    """ReqRead on inbox path allowed after 'filename_scan' check completed."""
+    contract = TaskContract(inbox_read_requires_filename_scan=True)
+    cmd = ReqRead(tool="read", path="inbox/msg_001.txt")
+    result = _enforce_contract(cmd, contract, ["filename_scan"])
+    assert result is None
+
+
+def test_contract_blocks_premature_clarification_without_scan() -> None:
+    """OUTCOME_NONE_CLARIFICATION blocked on inbox task without filename_scan."""
+    contract = TaskContract(inbox_read_requires_filename_scan=True)
+    cmd = ReportTaskCompletion(
+        tool="report_completion",
+        completed_steps_laconic=[],
+        message="ambiguous",
+        outcome="OUTCOME_NONE_CLARIFICATION",
+    )
+    result = _enforce_contract(cmd, contract, [])
+    assert result is not None
+    assert "filename_scan" in result
+
+
+def test_contract_allows_clarification_after_filename_scan() -> None:
+    """OUTCOME_NONE_CLARIFICATION allowed after filename_scan completed."""
+    contract = TaskContract(inbox_read_requires_filename_scan=True)
+    cmd = ReportTaskCompletion(
+        tool="report_completion",
+        completed_steps_laconic=[],
+        message="ambiguous",
+        outcome="OUTCOME_NONE_CLARIFICATION",
+    )
+    result = _enforce_contract(cmd, contract, ["filename_scan"])
+    assert result is None
+
+
+def test_contract_deletion_whitelist_blocks_outside_paths() -> None:
+    """ReqDelete outside whitelist prefixes is blocked."""
+    contract = TaskContract(deletion_whitelist=["02_distill/cards/"])
+    cmd = ReqDelete(tool="delete", path="01_capture/foo.md")
+    result = _enforce_contract(cmd, contract, [])
+    assert result is not None
+    assert "outside authorized paths" in result
+
+
+def test_contract_deletion_whitelist_allows_listed_path() -> None:
+    """ReqDelete within whitelist prefix is allowed."""
+    contract = TaskContract(deletion_whitelist=["02_distill/cards/"])
+    cmd = ReqDelete(tool="delete", path="02_distill/cards/foo.md")
+    result = _enforce_contract(cmd, contract, [])
+    assert result is None
+
+
+def test_contract_default_allows_non_inbox_operations() -> None:
+    """Default TaskContract does not block non-inbox ops."""
+    contract = TaskContract()
+    assert _enforce_contract(ReqRead(tool="read", path="/foo.md"), contract, []) is None
+    assert _enforce_contract(
+        ReqDelete(tool="delete", path="02_distill/cards/foo.md"), contract, [],
+    ) is None
+
+
+def test_contract_violation_injects_retry_in_solve_task(
+    mock_vm_client: MagicMock, mock_llm_client: MagicMock
+) -> None:
+    """Contract violation injects correction; agent replans and succeeds."""
+    delete_step = NextStep(
+        current_state="cleaning up",
+        confidence="high",
+        plan_remaining_steps_brief=["delete inbox file"],
+        task_completed=False,
+        function=ReqDelete(tool="delete", path="inbox/msg_001.txt"),
+    )
+    ok_step = NextStep(
+        current_state="done",
+        confidence="high",
+        plan_remaining_steps_brief=["report"],
+        task_completed=True,
+        function=ReportTaskCompletion(
+            tool="report_completion",
+            completed_steps_laconic=["done"],
+            message="Task complete",
+            grounding_refs=[],
+            outcome="OUTCOME_OK",
+        ),
+    )
+    assembled = AssembledPrompt(
+        include_entity_inbox=True,
+        vocabulary={},
+        task_contract=TaskContract(inbox_delete_authorized=False),
+    )
+    mock_llm_client.parse_step.side_effect = [assembled, delete_step, ok_step]
+
+    solve_task("process the inbox", mock_vm_client, mock_llm_client)
+
+    # vm.delete never called — contract blocked it
+    mock_vm_client.delete.assert_not_called()
+    # Agent eventually reported OK
+    mock_vm_client.answer.assert_called_once_with(
+        message="Task complete", outcome="OUTCOME_OK", refs=[],
+    )

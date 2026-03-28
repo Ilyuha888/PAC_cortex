@@ -28,11 +28,24 @@ _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     )),
     # Exfiltration: instructions to send content to external addresses
     ("exfiltration instruction", re.compile(
-        r"(?i)(send|email|forward|upload|push|post)\s+.{3,60}(password|secret|key|token|credential|api)"
+        r"(?i)(send|email|forward|upload|push|post)\s+.{3,60}(password|secret|key|token|credential)"
+    )),
+    # Destructive shell commands embedded in content
+    ("destructive shell command", re.compile(
+        r"(?i)\brm\s+-[rf]{1,2}|rmdir\s+/|del\s+/[sq]|format\s+[a-z]:"
     )),
     # Priority/urgent override: file poses as an urgent ops directive
     ("priority override injection", re.compile(
         r"(?i)(urgent|priority|immediate|critical)\s*[:\-]?\s*(override|admin|ops|escalation|directive)\b"
+    )),
+    # Bracket/template control injection: [[hijack::...]] or [[key::override]] patterns
+    ("bracket control injection", re.compile(
+        r"(?i)\[\[.{0,60}(hijack|override|inject|redirect|intercept|exploit|jailbreak|bypass)\b"
+    )),
+    # Social engineering via filename: override-escalation-request style filenames
+    ("override escalation probe", re.compile(
+        r"(?i)\b(override|hijack|exploit)[_\-\s]+(escalation|request|directive|payload|attack|inject)\b"
+        r"|\b(escalation)[_\-\s]+(override|request|directive)\b"
     )),
     # Action directives in file content: "please execute/run/do X immediately"
     ("action directive injection", re.compile(
