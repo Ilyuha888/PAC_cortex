@@ -20,14 +20,16 @@ class TaskTracer:
         instruction: str,
         trace_dir: str,
     ) -> None:
-        short_trial = trial_id[:8]
-        filename = f"{task_id}_{short_trial}.txt"
-        path = Path(trace_dir) / filename
-        self._file: io.TextIOWrapper = path.open("w", buffering=1, encoding="utf-8")
+        self._start = datetime.now(UTC)
+        self._trace_dir = Path(trace_dir)
+        self._task_id = task_id
+        tmp_name = f"{task_id}_{trial_id[:8]}.tmp"
+        self._path = self._trace_dir / tmp_name
+        self._file: io.TextIOWrapper = self._path.open("w", buffering=1, encoding="utf-8")
         self._write(
             f"=== Task: {task_id} | Trial: {trial_id} ===\n"
             f"Instruction: {instruction[:300]}\n"
-            f"Started: {datetime.now(UTC).isoformat(timespec='seconds')}\n"
+            f"Started: {self._start.isoformat(timespec='seconds')}\n"
         )
 
     def _write(self, text: str) -> None:
@@ -82,12 +84,28 @@ class TaskTracer:
             f"Message   : {message[:200]}\n"
             f"API calls : {api_calls}\n"
         )
+        self._rename_with_elapsed()
 
     def record_error(self, reason: str, api_calls: int) -> None:
         self._write(
             f"\n=== STOPPED: {reason} ===\n"
             f"API calls : {api_calls}\n"
         )
+        self._rename_with_elapsed()
+
+    def _rename_with_elapsed(self) -> None:
+        elapsed = int((datetime.now(UTC) - self._start).total_seconds())
+        ts = self._start.strftime("%Y%m%dT%H%M")
+        final_name = f"{self._task_id}_{ts}_{elapsed}s.txt"
+        final_path = self._trace_dir / final_name
+        try:
+            self._path.rename(final_path)
+            self._path = final_path
+        except OSError:
+            pass  # keep .tmp name on rename failure
 
     def close(self) -> None:
         self._file.close()
+        # Rename if not already renamed (e.g. close without completion/error)
+        if self._path.suffix == ".tmp":
+            self._rename_with_elapsed()

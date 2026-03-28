@@ -13,6 +13,9 @@ class Settings(BaseSettings):
     vm_call_retries: int = 2
     api_call_budget: int = 1000
     trace_dir: str = "traces"
+    # Gemini via litellm needs reasoning tokens to produce valid NextStep JSON.
+    # 0 → choices:null on complex schemas; unconstrained → ~490 tokens/call waste.
+    llm_thinking_budget: int = 1024
 
 
 settings = Settings()

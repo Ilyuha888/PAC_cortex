@@ -19,7 +19,7 @@ No database, no asyncio.
 | `client.py` | BitGN protobuf clients (harness + VM) | `HarnessClient`, `VmClient`, `Trial`, `TrialResult` | integration |
 | `llm.py` | OpenAI-compatible SGR completions | `LLMClient.parse_step()` | integration |
 | `safety.py` | Injection scan, secret redact, tool validation | `scan_for_injection`, `redact_secrets`, `validate_tool_call` | unit |
-| `agent.py` | Core SGR loop + pre-flight assembler + TaskContract dispatch | `solve_task`, `NextStep`, `TaskContract`, `AssembledPrompt`, `_enforce_contract` | unit + integration (100 tests) |
+| `agent.py` | Core SGR loop + pre-flight assembler + TaskContract dispatch | `solve_task`, `NextStep`, `TaskContract`, `AssembledPrompt`, `_enforce_contract` | unit + integration (110 tests) |
 | `runner.py` | Session orchestrator (sequential tasks) | `run_session` | integration |
 | `tracer.py` | Per-task crash-safe trace file writer | `TaskTracer` | — |
 | `main.py` | CLI entrypoint (`smoke`, `run`) | `main` | — |
@@ -56,6 +56,8 @@ main.py cmd_run()
 
 - **Fully sync** — no asyncio; `HarnessServiceClientSync` / `PcmRuntimeClientSync` throughout.
 - **SGR loop cap** — `_MAX_STEPS = 50` hard limit per task; step budget exhausted → `OUTCOME_ERR_INTERNAL`.
+- **Thinking budget** — Gemini models via litellm need a non-zero `thinking_budget` to produce valid structured JSON for `NextStep`. With `thinking_budget: 0` the model cannot organize complex schema output and returns `choices: null`. Default 1024 tokens balances reliability vs cost (~490 tokens/call unconstrained). Tunable via `LLM_THINKING_BUDGET`.
+- **LLM failure fallback** — if `parse_step` raises `RuntimeError` (e.g. proxy returns `choices: null`), agent answers `OUTCOME_ERR_INTERNAL` gracefully instead of crashing. On penultimate retry, `extra_body` is stripped as a last-resort fallback.
 - **API budget guard** — hard-stop at `api_call_budget - 50` (default 950/1000) calls; aborts before exceeding cap.
 - **Stagnation guard** — 3 identical consecutive tool+args signatures → abort with `OUTCOME_ERR_INTERNAL`.
 - **TaskContract enforcement** — assembler classifies what's allowed (`TaskContract`); `_enforce_contract()` blocks violations at dispatch level before tool execution. Max 3 contract violations → abort. Covers: inbox deletion, premature inbox reads, out-of-scope deletions.
@@ -127,5 +129,6 @@ If entity files are missing or the contact cannot be found → `OUTCOME_NONE_CLA
 | `VM_CALL_TIMEOUT_S` | `10.0` | Per-VM-call timeout (seconds) |
 | `VM_CALL_RETRIES` | `2` | VM call retry count on timeout/error |
 | `TRACE_DIR` | `traces/` | Directory for per-task trace files |
+| `LLM_THINKING_BUDGET` | `1024` | Thinking token budget for structured output (0 = disabled) |
 
 > Design rationale, rejected alternatives, and decision history live in `.quint/`.

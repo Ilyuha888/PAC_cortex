@@ -84,6 +84,17 @@ def test_preflight_workflow_constraints_appear_in_prompt() -> None:
     assert "seq.json" in prompt
 
 
+def test_build_system_prompt_includes_delete_verify_contract() -> None:
+    assembled = AssembledPrompt(
+        include_entity_inbox=False,
+        vocabulary={},
+        task_contract=TaskContract(deletion_requires_verification=True),
+    )
+    prompt = _build_system_prompt(assembled)
+    assert "Bulk delete verification required" in prompt
+    assert "delete_verify" in prompt
+
+
 def test_preflight_capture_subfolders_appear_in_prompt() -> None:
     assembled = AssembledPrompt(
         include_entity_inbox=False,
@@ -625,6 +636,46 @@ def test_contract_deletion_whitelist_allows_listed_path() -> None:
     """ReqDelete within whitelist prefix is allowed."""
     contract = TaskContract(deletion_whitelist=["02_distill/cards/"])
     cmd = ReqDelete(tool="delete", path="02_distill/cards/foo.md")
+    result = _enforce_contract(cmd, contract, [])
+    assert result is None
+
+
+def test_contract_blocks_ok_without_delete_verify() -> None:
+    """OUTCOME_OK blocked on deletion task without 'delete_verify' in checks_completed."""
+    contract = TaskContract(deletion_requires_verification=True)
+    cmd = ReportTaskCompletion(
+        tool="report_completion",
+        completed_steps_laconic=["deleted all"],
+        message="Done",
+        outcome="OUTCOME_OK",
+    )
+    result = _enforce_contract(cmd, contract, [])
+    assert result is not None
+    assert "delete_verify" in result
+
+
+def test_contract_allows_ok_after_delete_verify() -> None:
+    """OUTCOME_OK allowed on deletion task after 'delete_verify' check completed."""
+    contract = TaskContract(deletion_requires_verification=True)
+    cmd = ReportTaskCompletion(
+        tool="report_completion",
+        completed_steps_laconic=["deleted all", "verified"],
+        message="Done",
+        outcome="OUTCOME_OK",
+    )
+    result = _enforce_contract(cmd, contract, ["delete_verify"])
+    assert result is None
+
+
+def test_contract_delete_verify_does_not_block_non_ok_outcomes() -> None:
+    """Non-OK outcomes are not blocked by deletion_requires_verification."""
+    contract = TaskContract(deletion_requires_verification=True)
+    cmd = ReportTaskCompletion(
+        tool="report_completion",
+        completed_steps_laconic=[],
+        message="error",
+        outcome="OUTCOME_ERR_INTERNAL",
+    )
     result = _enforce_contract(cmd, contract, [])
     assert result is None
 

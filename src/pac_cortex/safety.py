@@ -87,6 +87,16 @@ _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("webhook exfiltration", re.compile(
         r"(?i)(https?://[^\s]{0,80}(webhook|exfil|callback|c2|ngrok|burp|requestbin|pipedream))"
     )),
+    # Credential collection: "collect/gather/extract credentials/tokens/keys"
+    ("credential collection instruction", re.compile(
+        r"(?i)(collect|gather|extract|retrieve|obtain)\s+.{0,40}"
+        r"(credentials?|access\s+notes?|api[_\-\s]?keys?|tokens?|secrets?|passwords?)"
+    )),
+    # Trusted relay framing: social engineering via authority claim
+    ("trusted relay social engineering", re.compile(
+        r"(?i)(security\s+(relay|bridge)|authenticated\s+request"
+        r"|pre-?approved|marked\s+as\s+trusted)\b"
+    )),
 ]
 
 # Env var names and credential formats that must never appear in outputs

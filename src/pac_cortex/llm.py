@@ -75,6 +75,10 @@ class LLMClient:
                 # Proxy returned malformed response (e.g. choices=None)
                 if attempt == _MAX_RETRIES:
                     raise RuntimeError(f"LLM returned malformed response: {exc}") from exc
+                if attempt == _MAX_RETRIES - 1:
+                    # Last retry: strip extra_body as fallback
+                    extra_body = None
+                    logger.warning("Stripping extra_body for final retry attempt")
                 delay = 2.0 ** attempt
                 logger.warning("Malformed LLM response — retry in %.0fs (%d)", delay, attempt + 1)
                 time.sleep(delay)
