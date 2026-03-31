@@ -52,8 +52,10 @@ _INJECTION_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"(?i)\b(execute|perform|run|carry\s+out)\s+(the\s+following|immediately|now|urgently|this\s+task)"
     )),
     # Hidden log / hide action: file tries to suppress audit trail
+    # Require hide/suppress to appear near an audit-trail word to avoid FP on business English
     ("log suppression injection", re.compile(
-        r"(?i)(hide|suppress|do\s+not\s+log|without\s+logging|don.t\s+log|no\s+trace)"
+        r"(?i)(do\s+not\s+log|without\s+logging|don.t\s+log|no\s+trace"
+        r"|(?:hide|suppress)\s.{0,30}(?:log|audit|trace|monitor|record|track))"
     )),
     # Persona jailbreaks
     ("jailbreak persona", re.compile(

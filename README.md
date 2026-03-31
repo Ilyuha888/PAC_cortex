@@ -6,7 +6,7 @@ Solves tasks in a deterministic simulated environment via API. Scored on correct
 
 ## Status
 
-**22/22 (100.0%)** on BitGN benchmark. SDK integration complete; agent runs the full SGR loop against the harness.
+**25/25 (100.0%)** on BitGN benchmark. SDK integration complete; agent runs the full SGR loop against the harness.
 
 ## Setup
 

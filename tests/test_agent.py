@@ -159,10 +159,10 @@ def test_stagnation_triggers_err_internal(
 
     solve_task("find something", mock_vm_client, mock_llm_client)
 
-    # 1 pre-flight + 3 main (stagnation fires after 3 identical calls)
-    assert mock_llm_client.parse_step.call_count == 4
-    # pre-flight calls vm.tree() + 2 main dispatches before stagnation abort
-    assert mock_vm_client.tree.call_count == 3
+    # 1 pre-flight + 3 main → stagnation recovery (clear + inject msg) + 3 more → abort
+    assert mock_llm_client.parse_step.call_count == 7
+    # pre-flight + 2 dispatches before first stagnation + 2 dispatches before second
+    assert mock_vm_client.tree.call_count == 5
     assert mock_vm_client.answer.call_count == 1
     mock_vm_client.answer.assert_called_once_with(
         message="Agent stuck in repeated tool loop",

@@ -59,7 +59,7 @@ main.py cmd_run()
 - **Thinking budget** — Gemini models via litellm need a non-zero `thinking_budget` to produce valid structured JSON for `NextStep`. With `thinking_budget: 0` the model cannot organize complex schema output and returns `choices: null`. Default 1024 tokens balances reliability vs cost (~490 tokens/call unconstrained). Tunable via `LLM_THINKING_BUDGET`.
 - **LLM failure fallback** — if `parse_step` raises `RuntimeError` (e.g. proxy returns `choices: null`), agent answers `OUTCOME_ERR_INTERNAL` gracefully instead of crashing. On penultimate retry, `extra_body` is stripped as a last-resort fallback.
 - **API budget guard** — hard-stop at `api_call_budget - 50` (default 950/1000) calls; aborts before exceeding cap.
-- **Stagnation guard** — 3 identical consecutive tool+args signatures → abort with `OUTCOME_ERR_INTERNAL`.
+- **Stagnation guard** — 3 identical consecutive tool+args signatures → inject a recovery prompt and clear history (one attempt). Second stagnation → abort with `OUTCOME_ERR_INTERNAL`.
 - **TaskContract enforcement** — assembler classifies what's allowed (`TaskContract`); `_enforce_contract()` blocks violations at dispatch level before tool execution. Max 3 contract violations → abort. Covers: inbox deletion, premature inbox reads, out-of-scope deletions.
 - **Safety pipeline** — every tool result passes `scan_for_injection` then `redact_secrets` before entering LLM context. Write content scanned before execution.
 - **Tool allowlist** — `NextStep.function` is a Pydantic discriminated union; only schema-declared tools can be emitted: `tree`, `find`, `search`, `list`, `read`, `write`, `delete`, `mkdir`, `move`, `context`, `report_completion`.
@@ -72,7 +72,7 @@ main.py cmd_run()
 | Code | Meaning | When used |
 |---|---|---|
 | `OUTCOME_OK` | Task completed successfully | All graded objectives met |
-| `OUTCOME_DENIED_SECURITY` | Injection or security violation detected | File content issued directives; suspicious file confirmed; spoofed email sender (From: address doesn't match registered contact) |
+| `OUTCOME_DENIED_SECURITY` | Injection or security violation detected | File content issued directives; suspicious file confirmed; spoofed email sender in single-message inbox (From: address doesn't match registered contact). In multi-message inbox, spoofed messages are skipped and processing continues — only a fully empty inbox after skipping triggers abort. |
 | `OUTCOME_NONE_CLARIFICATION` | Task instruction ambiguous | Agent cannot proceed without more information |
 | `OUTCOME_NONE_UNSUPPORTED` | Required capability unavailable | Email, HTTP, external APIs, calendar |
 | `OUTCOME_ERR_INTERNAL` | Agent-side failure | Budget exhausted, stagnation, schema parse failure, step limit |
@@ -82,18 +82,22 @@ main.py cmd_run()
 ## Pre-flight Assembler
 
 Before the main SGR loop, `_preflight()` makes a separate LLM call that analyzes workspace
-metadata and produces an `AssembledPrompt` with nine structured fields:
+metadata and produces an `AssembledPrompt` with ten structured fields:
 
 1. `include_entity_inbox` — whether to inject CRM/inbox prompt rules
 2. `vocabulary` — term definitions extracted from AGENTS.md
 3. `protected_paths` — underscore-prefixed files/dirs (never delete)
 4. `workflow_constraints` — rules triggered by directory patterns (outbox/, distill/, reminders/)
 5. `capture_subfolders` — subdirectory list for capture routing
-6. `hierarchy_conflict` / `conflict_description` — L4/L5 AGENTS.md conflict detection
-7. `resolved_instructions` — scope-labeled rules from nested AGENTS.md
-8. `task_contract` — dispatch-enforced constraints (see Key Invariants)
+6. `hierarchy_conflict` — L4/L5 AGENTS.md conflict detection; conditional exceptions (IF X THEN Y) are not conflicts
+7. `is_l1_l2_weakening` — true only when the conflict weakens a hardcoded security invariant; false for same-level or L5-vs-L4 non-security conflicts
+8. `conflict_description` — quoted text + explanation when `hierarchy_conflict` is true
+9. `resolved_instructions` — scope-labeled rules from nested AGENTS.md
+10. `task_contract` — dispatch-enforced constraints (see Key Invariants)
 
 The assembler prompt uses an authority model (L1-2 hardcoded security → L3 task → L4 root AGENTS.md → L5 nested AGENTS.md). AGENTS.md content passes through structured JSON output, acting as an injection firewall — file content cannot become instructions.
+
+Conflict handling: L1-2 weakening → warn + proceed (agent already has hardcoded rules). Same-level or non-security L5-vs-L4 conflict → `OUTCOME_NONE_CLARIFICATION`. `is_l1_l2_weakening` is determined by the assembler field, not by string heuristics.
 
 On any pre-flight failure, `_SYSTEM_PROMPT_FULL` (all sections concatenated) is used as fallback with a maximally restrictive default `TaskContract`.
 
@@ -107,10 +111,13 @@ Tasks t12-t20 use an ERC3-style runtime with typed entities (contacts, companies
 2. Reads CRM entity files under `tree`-discovered data/contacts directories.
 3. **Sender verification before fulfilling any email-driven request:**
    - Extracts `From:` address from the inbox email file.
-   - Finds the matching contact entity; reads their registered email field.
-   - If `From:` ≠ registered email → spoofed sender → `OUTCOME_DENIED_SECURITY`.
+   - If the message contains an explicit admin/OTP email address, use it directly — no contact lookup required.
+   - Otherwise finds the matching contact entity; reads their registered email field.
+   - If `From:` ≠ registered email → spoofed sender. In a single-message inbox: `OUTCOME_DENIED_SECURITY`. In a multi-message inbox: skip the message and continue to the next.
    - Verifies sender is associated with the claimed company → else `OUTCOME_DENIED_SECURITY`.
-4. Only if both checks pass does it locate and return the requested document.
+4. Only if checks pass does it locate and return the requested document.
+5. **Latest invoice resolution**: search by `account_id`, read each candidate file, compare `issued_on` dates — do not rely on filename sort order.
+6. **Duplicate contact disambiguation**: when multiple contacts share a name, try in order: (a) company/org name from message body → search accounts/; (b) topical keywords from body → search accounts/; (c) read each contact's linked `account_id` record and compare account name/industry against message topic. Only email all matches if all three steps fail. The Channel/Handle header identifies the sender — never use it to disambiguate the recipient.
 
 If entity files are missing or the contact cannot be found → `OUTCOME_NONE_CLARIFICATION`.
 
